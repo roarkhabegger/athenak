@@ -1976,6 +1976,27 @@ def convert_file(binary_fname):
     write_xdmf_for(xdmf_fname, os.path.basename(athdf_fname), filedata)
 
 
+def convert_dir(bin_directory,athdf_directory):
+    """
+    Converts all .bin files in a directory to .athdf and .xdmf files.
+
+    args:
+      directory - string
+        path to directory containing .bin files
+      athdf_directory - string
+        path to directory where .athdf and .xdmf files will be saved
+    """
+    for filename in os.listdir(bin_directory):
+        if filename.endswith(".bin"):
+            binary_fname = os.path.join(bin_directory, filename)
+            athdf_fname = os.path.join(athdf_directory, filename.replace(".bin", ".athdf"))
+            xdmf_fname = athdf_fname + ".xdmf"
+            filedata = read_binary(binary_fname)
+            write_athdf(athdf_fname, filedata)
+            write_xdmf_for(xdmf_fname, os.path.basename(athdf_fname), filedata)
+            
+
+
 if __name__ == "__main__":
     import sys
 
@@ -1988,9 +2009,21 @@ if __name__ == "__main__":
                 print(x)
                 yield x
 
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 1:
         print(f"Usage: {sys.argv[0]} output_file_1.bin [output_file_2.bin [...]]")
+        print(f"   or: {sys.argv[0]} output_directory_to_translate_to_athdf")
         exit(1)
 
-    for binary_fname in tqdm(sys.argv[1:]):
-        convert_file(binary_fname)
+    print(sys.argv[1][-4:])
+    if sys.argv[1][-4:] == ".bin":
+        for binary_fname in tqdm(sys.argv[1:]):
+            convert_file(binary_fname)
+    else:
+        bin_directory = sys.argv[1]
+        athdf_directory = "athdf"
+
+        #check if athdf_directory exists, if not create it
+        if not os.path.exists(athdf_directory):
+            os.makedirs(athdf_directory)
+
+        convert_dir(bin_directory, athdf_directory)
