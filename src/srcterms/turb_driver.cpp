@@ -826,14 +826,15 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
   int &nx1 = indcs.nx1;
   int &nx2 = indcs.nx2;
   int &nx3 = indcs.nx3;
-
+  
   Real dt = pm->dt;
+  Real bdt = pdrive->beta[stage-1] * dt;
   Real fcorr, gcorr;
   if (tcorr <= 1e-6) {  // use whitenoise
     fcorr = 0.0;
     gcorr = 1.0;
   } else {
-    fcorr = std::exp(-dt/tcorr);
+    fcorr = std::exp(-bdt/tcorr);
     gcorr = std::sqrt(1.0 - fcorr*fcorr);
   }
 
@@ -889,17 +890,17 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
 
       Real Fv = (v1*ux + v2*uy + v3*uz)/ut;
 
-      u0(m,IEN,k,j,i) += Fv*den*dt;
+      u0(m,IEN,k,j,i) += Fv*den*bdt;
     }
-    u0(m,IM1,k,j,i) += den*v1*dt;
-    u0(m,IM2,k,j,i) += den*v2*dt;
-    u0(m,IM3,k,j,i) += den*v3*dt;
-
+    u0(m,IM1,k,j,i) += den*v1*bdt;
+    u0(m,IM2,k,j,i) += den*v2*bdt;
+    u0(m,IM3,k,j,i) += den*v3*bdt;
+ 
     if (flag_twofl) {
       den = u0_(m,IDN,k,j,i);
-      u0_(m,IM1,k,j,i) += den*v1*dt;
-      u0_(m,IM2,k,j,i) += den*v2*dt;
-      u0_(m,IM3,k,j,i) += den*v3*dt;
+      u0_(m,IM1,k,j,i) += den*v1*bdt;
+      u0_(m,IM2,k,j,i) += den*v2*bdt;
+      u0_(m,IM3,k,j,i) += den*v3*bdt;
     }
   });
 
