@@ -1994,7 +1994,7 @@ def convert_dir(bin_directory,athdf_directory):
             filedata = read_binary(binary_fname)
             write_athdf(athdf_fname, filedata)
             write_xdmf_for(xdmf_fname, os.path.basename(athdf_fname), filedata)
-            
+            #os.remove(binary_fname)
 
 
 if __name__ == "__main__":
