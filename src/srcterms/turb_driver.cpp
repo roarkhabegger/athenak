@@ -283,7 +283,6 @@ void TurbulenceDriver::Initialize() {
 void TurbulenceDriver::IncludeInitializeModesTask(std::shared_ptr<TaskList> tl,
                                                   TaskID start) {
   auto id_init = tl->AddTask(&TurbulenceDriver::InitializeModes, this, start);
-  tl->AddTask(&TurbulenceDriver::AddForcing, this, id_init);
   return;
 }
 
@@ -298,11 +297,11 @@ void TurbulenceDriver::IncludeAddForcingTask(std::shared_ptr<TaskList> tl, TaskI
   if (pmy_pack->pionn == nullptr) {
     if (pmy_pack->phydro != nullptr) {
       tl->InsertTask(&TurbulenceDriver::AddForcing, this,
-                     pmy_pack->phydro->id.flux, pmy_pack->phydro->id.rkupdt);
+                     pmy_pack->phydro->id.rkupdt, pmy_pack->phydro->id.srctrms);
     }
     if (pmy_pack->pmhd != nullptr) {
       tl->InsertTask(&TurbulenceDriver::AddForcing, this,
-                     pmy_pack->pmhd->id.flux, pmy_pack->pmhd->id.rkupdt);
+                     pmy_pack->pmhd->id.rkupdt, pmy_pack->pmhd->id.srctrms);
     }
   } else {
     tl->InsertTask(&TurbulenceDriver::AddForcing, this,
@@ -810,6 +809,21 @@ TaskStatus TurbulenceDriver::InitializeModes(Driver *pdrive, int stage) {
     force_tmp_(m,2,k,j,i) *= s;
   });
 
+  Real fcorr, gcorr;
+  if (tcorr <= 1e-6) {  // use whitenoise
+	  fcorr = 0.0;
+	  gcorr = 1.0;
+  } else {
+	  fcorr = std::exp(-dt/tcorr);
+	  gcorr = std::sqrt(1.0 - fcorr*fcorr);
+  }
+  auto force_ = force;
+  par_for("force_OU_process",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
+		  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+		  force_(m,0,k,j,i) = fcorr*force_(m,0,k,j,i) + gcorr*force_tmp_(m,0,k,j,i);
+		  force_(m,1,k,j,i) = fcorr*force_(m,1,k,j,i) + gcorr*force_tmp_(m,1,k,j,i);
+		  force_(m,2,k,j,i) = fcorr*force_(m,2,k,j,i) + gcorr*force_tmp_(m,2,k,j,i);
+		  });
   return TaskStatus::complete;
 }
 
@@ -829,14 +843,6 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
   
   Real dt = pm->dt;
   Real bdt = (pdrive->beta[stage-1]) * dt;
-  Real fcorr, gcorr;
-  if (tcorr <= 1e-6) {  // use whitenoise
-    fcorr = 0.0;
-    gcorr = 1.0;
-  } else {
-    fcorr = std::exp(-bdt/tcorr);
-    gcorr = std::sqrt(1.0 - fcorr*fcorr);
-  }
 
   EquationOfState *peos=NULL;
 
@@ -856,20 +862,11 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
   }
 
   bool flag_relativistic = pmy_pack->pcoord->is_special_relativistic;
-  if (flag_relativistic) {
-    if (pmy_pack->phydro != nullptr) w0 = (pmy_pack->phydro->w0);
-    if (pmy_pack->pmhd != nullptr) w0 = (pmy_pack->pmhd->w0);
-  }
+  if (pmy_pack->phydro != nullptr) w0 = (pmy_pack->phydro->w0);
+  if (pmy_pack->pmhd != nullptr) w0 = (pmy_pack->pmhd->w0);
 
   auto force_ = force;
-  auto force_tmp_ = force_tmp;
 
-  par_for("force_OU_process",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
-  KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    force_(m,0,k,j,i) = fcorr*force_(m,0,k,j,i) + gcorr*force_tmp_(m,0,k,j,i);
-    force_(m,1,k,j,i) = fcorr*force_(m,1,k,j,i) + gcorr*force_tmp_(m,1,k,j,i);
-    force_(m,2,k,j,i) = fcorr*force_(m,2,k,j,i) + gcorr*force_tmp_(m,2,k,j,i);
-  });
   
   bool flag_ideal = peos->eos_data.is_ideal;
   par_for("push",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
@@ -878,7 +875,7 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
     Real v2 = force_(m,1,k,j,i);
     Real v3 = force_(m,2,k,j,i);
      
-    Real den = u0(m,IDN,k,j,i);
+    Real den = w0(m,IDN,k,j,i);
     if (flag_relativistic) {
       // Compute Lorentz factor
       auto &ux = w0(m,IVX,k,j,i);
@@ -892,9 +889,9 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
 
       u0(m,IEN,k,j,i) += Fv*den*bdt;
     } else if (flag_ideal) {
-      Real ux = u0(m,IM1,k,j,i)/den;
-      Real uy = u0(m,IM2,k,j,i)/den;
-      Real uz = u0(m,IM3,k,j,i)/den;
+      Real ux = w0(m,IM1,k,j,i);
+      Real uy = w0(m,IM2,k,j,i);
+      Real uz = w0(m,IM3,k,j,i);
 
       u0(m,IEN,k,j,i) += bdt*den*(v1*ux + v2*uy + v3*uz);
     }
@@ -1185,19 +1182,7 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real den = u0(m,IDN,k,j,i);
 
-      if (flag_relativistic) {
-
-        auto &ux = w0(m,IVX,k,j,i);
-        auto &uy = w0(m,IVY,k,j,i);
-        auto &uz = w0(m,IVZ,k,j,i);
-        Real ut = 1. + ux*ux + uy*uy + uz*uz;
-        ut = sqrt(ut);
-        den /= ut;
-
-        Real Fv_avg = den*(t1*ux + t2*uy + t3*uz)/ut/t0;
-
-        u0(m,IEN,k,j,i) -= Fv_avg;
-      } else if (flag_ideal) {
+      if (flag_ideal) {
         u0(m,IEN,k,j,i) -= 0.5*den*(t1*t1 + t2*t2 + t3*t3)/(t0*t0);
       }
       u0(m,IM1,k,j,i) -= den*t1/t0;
