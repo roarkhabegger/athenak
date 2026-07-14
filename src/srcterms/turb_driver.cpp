@@ -870,20 +870,20 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
     force_(m,1,k,j,i) = fcorr*force_(m,1,k,j,i) + gcorr*force_tmp_(m,1,k,j,i);
     force_(m,2,k,j,i) = fcorr*force_(m,2,k,j,i) + gcorr*force_tmp_(m,2,k,j,i);
   });
-
-  std::cout <<  "Before Force" << std::endl;
+  
+  bool flag_ideal = peos->eos_data.is_ideal;
   par_for("push",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real v1 = force_(m,0,k,j,i);
     Real v2 = force_(m,1,k,j,i);
     Real v3 = force_(m,2,k,j,i);
-    
-    auto &ux = w0(m,IVX,k,j,i);
-    auto &uy = w0(m,IVY,k,j,i);
-    auto &uz = w0(m,IVZ,k,j,i);
-    Real den = w0(m,IDN,k,j,i);
+     
+    Real den = u0(m,IDN,k,j,i);
     if (flag_relativistic) {
       // Compute Lorentz factor
+      auto &ux = w0(m,IVX,k,j,i);
+      auto &uy = w0(m,IVY,k,j,i);
+      auto &uz = w0(m,IVZ,k,j,i);
       Real ut = 1. + ux*ux + uy*uy + uz*uz;
       ut = sqrt(ut);
       den /= ut;
@@ -891,15 +891,17 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
       Real Fv = (v1*ux + v2*uy + v3*uz)/ut;
 
       u0(m,IEN,k,j,i) += Fv*den*bdt;
+    } else if (flag_ideal) {
+      Real ux = u0(m,IM1,k,j,i)/den;
+      Real uy = u0(m,IM2,k,j,i)/den;
+      Real uz = u0(m,IM3,k,j,i)/den;
+
+      u0(m,IEN,k,j,i) += bdt*den*(v1*ux + v2*uy + v3*uz);
     }
     u0(m,IM1,k,j,i) += den*v1*bdt;
     u0(m,IM2,k,j,i) += den*v2*bdt;
     u0(m,IM3,k,j,i) += den*v3*bdt;
-     
-    auto &eos = peos->eos_data;
-    if (eos.is_ideal) {
-      u0(m,IEN,k,j,i) += bdt*den*(v1*ux + v2*uy + v3*uz);
-    }
+    
     if (flag_twofl) {
       den = u0_(m,IDN,k,j,i);
       u0_(m,IM1,k,j,i) += den*v1*bdt;
@@ -1178,16 +1180,16 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
     t0 = gm[0]; t1 = gm[1]; t2 = gm[2]; t3 = gm[3];
 #endif
 
-  std::cout <<  "Before Net Mom" << std::endl;
+    bool flag_ideal = peos->eos_data.is_ideal;
     par_for("net_mom_4",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real den = u0(m,IDN,k,j,i);
 
-      auto &ux = w0(m,IVX,k,j,i);
-      auto &uy = w0(m,IVY,k,j,i);
-      auto &uz = w0(m,IVZ,k,j,i);
       if (flag_relativistic) {
 
+        auto &ux = w0(m,IVX,k,j,i);
+        auto &uy = w0(m,IVY,k,j,i);
+        auto &uz = w0(m,IVZ,k,j,i);
         Real ut = 1. + ux*ux + uy*uy + uz*uz;
         ut = sqrt(ut);
         den /= ut;
@@ -1195,16 +1197,13 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
         Real Fv_avg = den*(t1*ux + t2*uy + t3*uz)/ut/t0;
 
         u0(m,IEN,k,j,i) -= Fv_avg;
+      } else if (flag_ideal) {
+        u0(m,IEN,k,j,i) -= 0.5*den*(t1*t1 + t2*t2 + t3*t3)/(t0*t0);
       }
       u0(m,IM1,k,j,i) -= den*t1/t0;
       u0(m,IM2,k,j,i) -= den*t2/t0;
       u0(m,IM3,k,j,i) -= den*t3/t0;
 
-      auto &eos = peos->eos_data;
-
-      if (eos.is_ideal) {
-        u0(m,IEN,k,j,i) -= 0.5*den*(t1*t1 + t2*t2 + t3*t3)/(t0*t0);
-      }
 
       if (flag_twofl) {
         den = u0_(m,IDN,k,j,i);
