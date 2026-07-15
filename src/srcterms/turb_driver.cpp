@@ -711,8 +711,29 @@ TaskStatus TurbulenceDriver::InitializeModes(Driver *pdrive, int stage) {
   const int nmkji = nmb*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
-  Real t0 = 0.0, t1 = 0.0, t2 = 0.0, t3 = 0.0;
 
+  Real dt = pm->dt;
+  Real vol = lx*ly*lz;
+  Real dvol = vol/(gnx1*gnx2*gnx3);
+
+  Real fcorr, gcorr;
+  if (tcorr <= 1e-6) {  // use whitenoise
+	  fcorr = 0.0;
+	  gcorr = 1.0;
+  } else {
+	  fcorr = std::exp(-dt/tcorr);
+	  gcorr = std::sqrt(1.0 - fcorr*fcorr);
+  }
+  auto force_ = force;
+  par_for("force_OU_process",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
+		  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+		  force_(m,0,k,j,i) = fcorr*force_(m,0,k,j,i) + gcorr*force_tmp_(m,0,k,j,i);
+		  force_(m,1,k,j,i) = fcorr*force_(m,1,k,j,i) + gcorr*force_tmp_(m,1,k,j,i);
+		  force_(m,2,k,j,i) = fcorr*force_(m,2,k,j,i) + gcorr*force_tmp_(m,2,k,j,i);
+		  });
+
+  Real t0 = 0.0, t1 = 0.0, t2 = 0.0, t3 = 0.0;      
+  
   Kokkos::parallel_reduce("net_mom_1", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &sum_t0, Real &sum_t1,
                                 Real &sum_t2, Real &sum_t3) {
@@ -728,9 +749,9 @@ TaskStatus TurbulenceDriver::InitializeModes(Driver *pdrive, int stage) {
       den += u0_(m,IDN,k,j,i);
     }
     sum_t0 += den;
-    sum_t1 += den*force_tmp_(m,0,k,j,i);
-    sum_t2 += den*force_tmp_(m,1,k,j,i);
-    sum_t3 += den*force_tmp_(m,2,k,j,i);
+    sum_t1 += den*force_(m,0,k,j,i);
+    sum_t2 += den*force_(m,1,k,j,i);
+    sum_t3 += den*force_(m,2,k,j,i);
   }, Kokkos::Sum<Real>(t0), Kokkos::Sum<Real>(t1),
      Kokkos::Sum<Real>(t2), Kokkos::Sum<Real>(t3));
 
@@ -744,15 +765,21 @@ TaskStatus TurbulenceDriver::InitializeModes(Driver *pdrive, int stage) {
 
   par_for("force_remove_net_mom", DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    force_tmp_(m,0,k,j,i) -= t1/t0;
-    force_tmp_(m,1,k,j,i) -= t2/t0;
-    force_tmp_(m,2,k,j,i) -= t3/t0;
+    force_(m,0,k,j,i) -= t1/t0;
+    force_(m,1,k,j,i) -= t2/t0;
+    force_(m,2,k,j,i) -= t3/t0;
   });
 
-  t0 = 0.0;
-  t1 = 0.0;
+
+  
+
+  // Compute normalization needed to match specified energy injection rate dedt.
+  // This requires a *separate* reduction from the mean-removal above: the energy
+  // injected depends both on the new kinetic energy added (~s^2 term, e0) and on
+  // the work done against the existing fluid momentum (~s term, e1).
+  Real e0 = 0.0, e1 = 0.0;
   Kokkos::parallel_reduce("net_mom_2", Kokkos::RangePolicy<>(DevExeSpace(),0,nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &sum_t0, Real &sum_t1) {
+  KOKKOS_LAMBDA(const int &idx, Real &sum_e0, Real &sum_e1) {
     // compute n,k,j,i indices of thread
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
@@ -771,59 +798,42 @@ TaskStatus TurbulenceDriver::InitializeModes(Driver *pdrive, int stage) {
       mom2 += u0_(m,IM2,k,j,i);
       mom3 += u0_(m,IM3,k,j,i);
     }
-    Real v1 = force_tmp_(m,0,k,j,i);
-    Real v2 = force_tmp_(m,1,k,j,i);
-    Real v3 = force_tmp_(m,2,k,j,i);
+    Real v1 = force_(m,0,k,j,i);
+    Real v2 = force_(m,1,k,j,i);
+    Real v3 = force_(m,2,k,j,i);
 
-    sum_t0 += den*(v1*v1+v2*v2+v3*v3);
-    sum_t1 += mom1*v1+mom2*v2+mom3*v3;
-  }, Kokkos::Sum<Real>(t0), Kokkos::Sum<Real>(t1));
+    sum_e0 += den*(v1*v1 + v2*v2 + v3*v3);
+    sum_e1 += mom1*v1 + mom2*v2 + mom3*v3;
+  }, Kokkos::Sum<Real>(e0), Kokkos::Sum<Real>(e1));
 
 #if MPI_PARALLEL_ENABLED
-  m[0] = t0; m[1] = t1;
-  MPI_Allreduce(m, gm, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  t0 = gm[0]; t1 = gm[1];
+  Real me[2], gme[2];
+  me[0] = e0; me[1] = e1;
+  MPI_Allreduce(me, gme, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  e0 = gme[0]; e1 = gme[1];
 #endif
 
-  t0 = std::max(t0, 1.0e-20);
-  t1 = std::max(t1, 1.0e-20);
+  Real m0 = 0.5*e0*dvol*dt;
+  Real m1 = e1*dvol;
 
-  Real m0 = t0, m1 = t1;
-  Real dt = pm->dt;
-  Real dvol = 1.0/(gnx1*gnx2*gnx3);
-  m0 = 0.5*m0*dvol*dt;
-  m1 = m1*dvol;
-
+  // Guard against m0 being vanishingly small (but not exactly zero), which would
+  // otherwise cause dedt/m0 to blow up and produce an unphysically large s.
+  const Real m0_floor = 1.0e-30;
   Real s;
-  if (m1 >= 0) {
+  if (m0 <= m0_floor) {
+    s = 0.0;
+  } else if (m1 >= 0.0) {
     s = -m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
   } else {
     s = m1/2./m0 + sqrt(m1*m1/4./m0/m0 + dedt/m0);
   }
-  if (m0 == 0.0) s = 0.0;
 
   par_for("force_norm", DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    force_tmp_(m,0,k,j,i) *= s;
-    force_tmp_(m,1,k,j,i) *= s;
-    force_tmp_(m,2,k,j,i) *= s;
+    force_(m,0,k,j,i) *= s;
+    force_(m,1,k,j,i) *= s;
+    force_(m,2,k,j,i) *= s;
   });
-
-  Real fcorr, gcorr;
-  if (tcorr <= 1e-6) {  // use whitenoise
-	  fcorr = 0.0;
-	  gcorr = 1.0;
-  } else {
-	  fcorr = std::exp(-dt/tcorr);
-	  gcorr = std::sqrt(1.0 - fcorr*fcorr);
-  }
-  auto force_ = force;
-  par_for("force_OU_process",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
-		  KOKKOS_LAMBDA(int m, int k, int j, int i) {
-		  force_(m,0,k,j,i) = fcorr*force_(m,0,k,j,i) + gcorr*force_tmp_(m,0,k,j,i);
-		  force_(m,1,k,j,i) = fcorr*force_(m,1,k,j,i) + gcorr*force_tmp_(m,1,k,j,i);
-		  force_(m,2,k,j,i) = fcorr*force_(m,2,k,j,i) + gcorr*force_tmp_(m,2,k,j,i);
-		  });
   return TaskStatus::complete;
 }
 
@@ -1183,7 +1193,8 @@ TaskStatus TurbulenceDriver::AddForcing(Driver *pdrive, int stage) {
       Real den = u0(m,IDN,k,j,i);
 
       if (flag_ideal) {
-        u0(m,IEN,k,j,i) -= 0.5*den*(t1*t1 + t2*t2 + t3*t3)/(t0*t0);
+        u0(m,IEN,k,j,i) -= (t1*u0(m,IM1,k,j,i) + t2*u0(m,IM2,k,j,i) + t3*u0(m,IM3,k,j,i))/t0
+                            - 0.5*den*(t1*t1 + t2*t2 + t3*t3)/(t0*t0);
       }
       u0(m,IM1,k,j,i) -= den*t1/t0;
       u0(m,IM2,k,j,i) -= den*t2/t0;
