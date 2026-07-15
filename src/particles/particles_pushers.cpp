@@ -89,6 +89,9 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
         uE[2] = pr(IPVZ,p) + 0.5*dt_*qom*E[2];
 
         //Propogate velocities by magnetic field, full step
+        uB[0] = uE[0] + dt_*qom*(uE[1]*B[2] - uE[2]*B[1]);
+        uB[1] = uE[1] + dt_*qom*(uE[2]*B[0] - uE[0]*B[2]);
+        uB[2] = uE[2] + dt_*qom*(uE[0]*B[1] - uE[1]*B[0]);
 
         //Propogate velocities by electric field, half step
         uE[0] = uB[0] + 0.5*dt_*qom*E[0];

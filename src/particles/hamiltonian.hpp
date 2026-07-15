@@ -499,32 +499,32 @@ void InterpolateFields( const Real * prtcl_x, const DvceFaceFld4D<Real> &b0_, co
 	Dz = (x3max - x3min)/indcs.nx3;
 	//Interpolate fluid velocity at new particle location x1, x2, x3
 	Real u[3];
-	u[0] = u0_.x1c(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_.x1c(m, kp, jp, ip+1) - u0_.x1c(m, kp, jp, ip))/Dx;
-	u[0] += u0_.x1c(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_.x1c(m, kp, jp+1, ip) - u0_.x1c(m, kp, jp, ip))/Dx;
-	u[0] += u0_.x1c(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(u0_.x1c(m, kp+1, jp, ip) - u0_.x1c(m, kp, jp, ip))/Dx;
+	u[0] = u0_(m, IM1, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_(m, IM1, kp, jp, ip+1) - u0_(m, IM1, kp, jp, ip))/Dx;
+	u[0] += u0_(m, IM1, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_(m, IM1, kp, jp+1, ip) - u0_(m, IM1, kp, jp, ip))/Dx;
+	u[0] += u0_(m, IM1, kp, jp, ip) + (prtcl_x[2] - x3v)*(u0_(m, IM1, kp+1, jp, ip) - u0_(m, IM1, kp, jp, ip))/Dx;
 	u[0] /= 3.0;
-	u[1] = u0_.x2c(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_.x2c(m, kp, jp, ip+1) - u0_.x2c(m, kp, jp, ip))/Dy;
-	u[1] += u0_.x2c(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_.x2c(m, kp, jp+1, ip) - u0_.x2c(m, kp, jp, ip))/Dy;
-	u[1] += u0_.x2c(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(u0_.x2c(m, kp+1, jp, ip) - u0_.x2c(m, kp, jp, ip))/Dy;
+	u[1] = u0_(m, IM2, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_(m, IM2, kp, jp, ip+1) - u0_(m, IM2, kp, jp, ip))/Dy;
+	u[1] += u0_(m, IM2, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_(m, IM2, kp, jp+1, ip) - u0_(m, IM2, kp, jp, ip))/Dy;
+	u[1] += u0_(m, IM2, kp, jp, ip) + (prtcl_x[2] - x3v)*(u0_(m, IM2, kp+1, jp, ip) - u0_(m, IM2, kp, jp, ip))/Dy;
 	u[1] /= 3.0;
-	u[2] = u0_.x3c(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_.x3c(m, kp, jp, ip+1) - u0_.x3c(m, kp, jp, ip))/Dz;
-	u[2] += u0_.x3c(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_.x3c(m, kp, jp+1, ip) - u0_.x3c(m, kp, jp, ip))/Dz;
-	u[2] += u0_.x3c(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(u0_.x3c(m, kp+1, jp, ip) - u0_.x3c(m, kp, jp, ip))/Dz;
+	u[2] = u0_(m, IM3, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_(m, IM3, kp, jp, ip+1) - u0_(m, IM3, kp, jp, ip))/Dz;
+	u[2] += u0_(m, IM3, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_(m, IM3, kp, jp+1, ip) - u0_(m, IM3, kp, jp, ip))/Dz;
+	u[2] += u0_(m, IM3, kp, jp, ip) + (prtcl_x[2] - x3v)*(u0_(m, IM3, kp+1, jp, ip) - u0_(m, IM3, kp, jp, ip))/Dz;
 	u[2] /= 3.0;
 
 	// Interpolate Electric Field at new particle location x1, x2, x3
-	E[0] = e0_.x1e(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(e0_.x1e(m, kp, jp, ip+1) - e0_.x1e(m, kp, jp, ip))/Dx;
-	E[0] += e0_.x1e(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(e0_.x1e(m, kp, jp+1, ip) - e0_.x1e(m, kp, jp, ip))/Dx;
-	E[0] += e0_.x1e(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(e0_.x1e(m, kp+1, jp, ip) - e0_.x1e(m, kp, jp, ip))/Dx;
-	E[0] /= 3.0;
-	E[1] = e0_.x2e(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(e0_.x2e(m, kp, jp, ip+1) - e0_.x2e(m, kp, jp, ip))/Dy;
-	E[1] += e0_.x2e(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(e0_.x2e(m, kp, jp+1, ip) - e0_.x2e(m, kp, jp, ip))/Dy;
-	E[1] += e0_.x2e(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(e0_.x2e(m, kp+1, jp, ip) - e0_.x2e(m, kp, jp, ip))/Dy;
-	E[1] /= 3.0;
-	E[2] = e0_.x3e(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(e0_.x3e(m, kp, jp, ip+1) - e0_.x3e(m, kp, jp, ip))/Dz;
-	E[2] += e0_.x3e(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(e0_.x3e(m, kp, jp+1, ip) - e0_.x3e(m, kp, jp, ip))/Dz;
-	E[2] += e0_.x3e(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(e0_.x3e(m, kp+1, jp, ip) - e0_.x3e(m, kp, jp, ip))/Dz;
-	E[2] /= 3.0;
+	// E[0] = e0_.x1e(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(e0_.x1e(m, kp, jp, ip+1) - e0_.x1e(m, kp, jp, ip))/Dx;
+	// E[0] += e0_.x1e(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(e0_.x1e(m, kp, jp+1, ip) - e0_.x1e(m, kp, jp, ip))/Dx;
+	// E[0] += e0_.x1e(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(e0_.x1e(m, kp+1, jp, ip) - e0_.x1e(m, kp, jp, ip))/Dx;
+	// E[0] /= 3.0;
+	// E[1] = e0_.x2e(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(e0_.x2e(m, kp, jp, ip+1) - e0_.x2e(m, kp, jp, ip))/Dy;
+	// E[1] += e0_.x2e(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(e0_.x2e(m, kp, jp+1, ip) - e0_.x2e(m, kp, jp, ip))/Dy;
+	// E[1] += e0_.x2e(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(e0_.x2e(m, kp+1, jp, ip) - e0_.x2e(m, kp, jp, ip))/Dy;
+	// E[1] /= 3.0;
+	// E[2] = e0_.x3e(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(e0_.x3e(m, kp, jp, ip+1) - e0_.x3e(m, kp, jp, ip))/Dz;
+	// E[2] += e0_.x3e(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(e0_.x3e(m, kp, jp+1, ip) - e0_.x3e(m, kp, jp, ip))/Dz;
+	// E[2] += e0_.x3e(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(e0_.x3e(m, kp+1, jp, ip) - e0_.x3e(m, kp, jp, ip))/Dz;
+	// E[2] /= 3.0;
 
 	// Interpolate Magnetic Field at new particle location x1, x2, x3
 	B[0] = b0_.x1f(m, kp, jp, ip) + (prtcl_x[0] - x1v)*(b0_.x1f(m, kp, jp, ip+1) - b0_.x1f(m, kp, jp, ip))/Dx;
@@ -539,5 +539,10 @@ void InterpolateFields( const Real * prtcl_x, const DvceFaceFld4D<Real> &b0_, co
 	B[2] += b0_.x3f(m, kp, jp, ip) + (prtcl_x[1] - x2v)*(b0_.x3f(m, kp, jp+1, ip) - b0_.x3f(m, kp, jp, ip))/Dz;
 	B[2] += b0_.x3f(m, kp, jp, ip) + (prtcl_x[2] - x3v)*(b0_.x3f(m, kp+1, jp, ip) - b0_.x3f(m, kp, jp, ip))/Dz;
 	B[2] /= 3.0;
+
+	//Electric Field determined from interpolated fluid velocity and magnetic field, to ensure E_||=0
+	E[0] = u[2]*B[1] - u[1]*B[2];
+	E[1] = u[0]*B[2] - u[2]*B[0];
+	E[2] = u[1]*B[0] - u[0]*B[1];
 
 }
