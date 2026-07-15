@@ -16,11 +16,15 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "bvals/bvals.hpp"
+#include "mhd/mhd.hpp"
+#include "eos/eos.hpp"
 
 // forward declarations
+class MHD;
+class EquationOfState;
 
 // constants that enumerate ParticlesPusher options
-enum class ParticlesPusher {drift, leap_frog, lagrangian_tracer, lagrangian_mc};
+enum class ParticlesPusher {drift, boris, leap_frog, lagrangian_tracer, lagrangian_mc};
 
 // constants that enumerate ParticleTypes
 enum class ParticleType {cosmic_ray};
