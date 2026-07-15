@@ -765,6 +765,442 @@ def athdf(filename, raw=False, data=None, quantities=None, dtype=None, level=Non
     return data
 
 
+
+# Bin conversion
+
+def read_binary(filename):
+    """
+    Reads a bin file from filename to dictionary.
+
+    Originally written by Lev Arzamasskiy (leva@ias.edu) on 11/15/2021
+    Updated to support mesh refinement by George Wong (gnwong@ias.edu) on 01/27/2022
+    Made faster by Drummond Fielding on 09/09/2024
+
+    args:
+      filename - string
+          filename of bin file to read
+
+    returns:
+      filedata - dict
+          dictionary of fluid file data
+    """
+
+    filedata = {}
+
+    # load file and get size
+    fp = open(filename, "rb")
+    fp.seek(0, 2)
+    filesize = fp.tell()
+    fp.seek(0, 0)
+
+    # load header information and validate file format
+    code_header = fp.readline().split()
+    if len(code_header) < 1:
+        raise TypeError("unknown file format")
+    if code_header[0] != b"Athena":
+        raise TypeError(
+            f"bad file format \"{code_header[0].decode('utf-8')}\" "
+            + '(should be "Athena")'
+        )
+    version = code_header[-1].split(b"=")[-1]
+    if version != b"1.1":
+        raise TypeError(f"unsupported file format version {version.decode('utf-8')}")
+
+    pheader_count = int(fp.readline().split(b"=")[-1])
+    pheader = {}
+    for _ in range(pheader_count - 1):
+        key, val = [x.strip() for x in fp.readline().decode("utf-8").split("=")]
+        pheader[key] = val
+    time = float(pheader["time"])
+    cycle = int(pheader["cycle"])
+    locsizebytes = int(pheader["size of location"])
+    varsizebytes = int(pheader["size of variable"])
+
+    nvars = int(fp.readline().split(b"=")[-1])
+    var_list = [v.decode("utf-8") for v in fp.readline().split()[1:]]
+    header_size = int(fp.readline().split(b"=")[-1])
+    header = [
+        line.decode("utf-8").split("#")[0].strip()
+        for line in fp.read(header_size).split(b"\n")
+    ]
+    header = [line for line in header if len(line) > 0]
+
+    if locsizebytes not in [4, 8]:
+        raise ValueError(f"unsupported location size (in bytes) {locsizebytes}")
+    if varsizebytes not in [4, 8]:
+        raise ValueError(f"unsupported variable size (in bytes) {varsizebytes}")
+
+    locfmt = "d" if locsizebytes == 8 else "f"
+    varfmt = "d" if varsizebytes == 8 else "f"
+
+    # load grid information from header and validate
+    def get_from_header(header, blockname, keyname):
+        blockname = blockname.strip()
+        keyname = keyname.strip()
+        if not blockname.startswith("<"):
+            blockname = "<" + blockname
+        if blockname[-1] != ">":
+            blockname += ">"
+        block = "<none>"
+        for line in [entry for entry in header]:
+            if line.startswith("<"):
+                block = line
+                continue
+            key, value = line.split("=")
+            if block == blockname and key.strip() == keyname:
+                return value
+        raise KeyError(f"no parameter called {blockname}/{keyname}")
+
+    Nx1 = int(get_from_header(header, "<mesh>", "nx1"))
+    Nx2 = int(get_from_header(header, "<mesh>", "nx2"))
+    Nx3 = int(get_from_header(header, "<mesh>", "nx3"))
+    nx1 = int(get_from_header(header, "<meshblock>", "nx1"))
+    nx2 = int(get_from_header(header, "<meshblock>", "nx2"))
+    nx3 = int(get_from_header(header, "<meshblock>", "nx3"))
+
+    nghost = int(get_from_header(header, "<mesh>", "nghost"))
+
+    x1min = float(get_from_header(header, "<mesh>", "x1min"))
+    x1max = float(get_from_header(header, "<mesh>", "x1max"))
+    x2min = float(get_from_header(header, "<mesh>", "x2min"))
+    x2max = float(get_from_header(header, "<mesh>", "x2max"))
+    x3min = float(get_from_header(header, "<mesh>", "x3min"))
+    x3max = float(get_from_header(header, "<mesh>", "x3max"))
+
+    # load data from each meshblock
+    n_vars = len(var_list)
+    mb_count = 0
+
+    mb_index = []
+    mb_logical = []
+    mb_geometry = []
+
+    mb_data = {}
+    for var in var_list:
+        mb_data[var] = []
+    while fp.tell() < filesize:
+        mb_index.append(
+            np.frombuffer(fp.read(24), dtype=np.int32).astype(np.int64) - nghost
+        )
+        nx1_out = (mb_index[mb_count][1] - mb_index[mb_count][0]) + 1
+        nx2_out = (mb_index[mb_count][3] - mb_index[mb_count][2]) + 1
+        nx3_out = (mb_index[mb_count][5] - mb_index[mb_count][4]) + 1
+        mb_logical.append(np.frombuffer(fp.read(16), dtype=np.int32))
+        mb_geometry.append(
+            np.frombuffer(
+                fp.read(6 * locsizebytes),
+                dtype=np.float64 if locfmt == "d" else np.float32,
+            )
+        )
+
+        data = np.fromfile(
+            fp,
+            dtype=np.float64 if varfmt == "d" else np.float32,
+            count=nx1_out * nx2_out * nx3_out * n_vars,
+        )
+        data = data.reshape(nvars, nx3_out, nx2_out, nx1_out)
+        for vari, var in enumerate(var_list):
+            mb_data[var].append(data[vari])
+        mb_count += 1
+
+    fp.close()
+
+    filedata["header"] = header
+    filedata["time"] = time
+    filedata["cycle"] = cycle
+    filedata["var_names"] = var_list
+
+    filedata["Nx1"] = Nx1
+    filedata["Nx2"] = Nx2
+    filedata["Nx3"] = Nx3
+    filedata["nvars"] = nvars
+
+    filedata["x1min"] = x1min
+    filedata["x1max"] = x1max
+    filedata["x2min"] = x2min
+    filedata["x2max"] = x2max
+    filedata["x3min"] = x3min
+    filedata["x3max"] = x3max
+
+    filedata["n_mbs"] = mb_count
+    filedata["nx1_mb"] = nx1
+    filedata["nx2_mb"] = nx2
+    filedata["nx3_mb"] = nx3
+    filedata["nx1_out_mb"] = (mb_index[0][1] - mb_index[0][0]) + 1
+    filedata["nx2_out_mb"] = (mb_index[0][3] - mb_index[0][2]) + 1
+    filedata["nx3_out_mb"] = (mb_index[0][5] - mb_index[0][4]) + 1
+
+    filedata["mb_index"] = np.array(mb_index)
+    filedata["mb_logical"] = np.array(mb_logical)
+    filedata["mb_geometry"] = np.array(mb_geometry)
+    filedata["mb_data"] = mb_data
+
+    return filedata
+
+
+
+def bin(
+    filename,
+    raw=False,
+    data=None,
+    quantities=None,
+    dtype=None,
+    level=None,
+    return_levels=False,
+    subsample=False,
+    fast_restrict=False,
+    x1_min=None,
+    x1_max=None,
+    x2_min=None,
+    x2_max=None,
+    x3_min=None,
+    x3_max=None,
+    vol_func=None,
+    vol_params=None,
+    face_func_1=None,
+    face_func_2=None,
+    face_func_3=None,
+    center_func_1=None,
+    center_func_2=None,
+    center_func_3=None,
+    num_ghost=0,
+):
+    """
+    Reads a bin file and organizes data similar to athdf format without writing to file.
+    Taken from bin_convert.py, returns dict like athdf()
+    """
+    # Step 1: Read binary data
+    filedata = read_binary(filename)
+
+    # Step 2: Organize data similar to athdf
+    if raw:
+        return filedata
+
+    # Prepare dictionary for results
+    if data is None:
+        data = {}
+        new_data = True
+    else:
+        new_data = False
+
+    # Extract size information
+    max_level = max(filedata["mb_logical"][:, 3])
+    if level is None:
+        level = max_level
+    block_size = [
+        filedata["nx1_out_mb"],
+        filedata["nx2_out_mb"],
+        filedata["nx3_out_mb"],
+    ]
+    root_grid_size = [filedata["Nx1"], filedata["Nx2"], filedata["Nx3"]]
+    levels = filedata["mb_logical"][:, 3]
+    logical_locations = filedata["mb_logical"][:, :3]
+    if dtype is None:
+        dtype = np.float32
+
+    # Calculate nx_vals
+    nx_vals = []
+    for d in range(3):
+        if block_size[d] == 1 and root_grid_size[d] > 1:  # sum or slice
+            other_locations = [
+                location
+                for location in zip(
+                    levels,
+                    logical_locations[:, (d + 1) % 3],
+                    logical_locations[:, (d + 2) % 3],
+                )
+            ]
+            if len(set(other_locations)) == len(other_locations):  # effective slice
+                nx_vals.append(1)
+            else:  # nontrivial sum
+                num_blocks_this_dim = 0
+                for level_this_dim, loc_this_dim in zip(
+                    levels, logical_locations[:, d]
+                ):
+                    if level_this_dim <= level:
+                        possible_max = (loc_this_dim + 1) * 2 ** (
+                            level - level_this_dim
+                        )
+                        num_blocks_this_dim = max(num_blocks_this_dim, possible_max)
+                    else:
+                        possible_max = (loc_this_dim + 1) // 2 ** (
+                            level_this_dim - level
+                        )
+                        num_blocks_this_dim = max(num_blocks_this_dim, possible_max)
+                nx_vals.append(num_blocks_this_dim)
+        elif block_size[d] == 1:  # singleton dimension
+            nx_vals.append(1)
+        else:  # normal case
+            nx_vals.append(root_grid_size[d] * 2**level + 2 * num_ghost)
+    nx1, nx2, nx3 = nx_vals
+    lx1, lx2, lx3 = [nx // bs for nx, bs in zip(nx_vals, block_size)]
+
+    # Set coordinate system and related functions
+    # coord = "cartesian"  # Adjust based on your data
+    if vol_func is None:
+
+        def vol_func(xm, xp, ym, yp, zm, zp):
+            return (xp - xm) * (yp - ym) * (zp - zm)
+
+    # Define center functions if not provided
+    if center_func_1 is None:
+
+        def center_func_1(xm, xp):
+            return 0.5 * (xm + xp)
+
+    if center_func_2 is None:
+
+        def center_func_2(xm, xp):
+            return 0.5 * (xm + xp)
+
+    if center_func_3 is None:
+
+        def center_func_3(xm, xp):
+            return 0.5 * (xm + xp)
+
+    # Populate coordinate arrays
+    center_funcs = [center_func_1, center_func_2, center_func_3]
+    for d in range(1, 4):
+        xf = f"x{d}f"
+        xv = f"x{d}v"
+        nx = nx_vals[d - 1]
+        if nx == 1:
+            xmin = filedata[f"x{d}min"]
+            xmax = filedata[f"x{d}max"]
+            data[xf] = np.array([xmin, xmax], dtype=dtype)
+        else:
+            xmin = filedata[f"x{d}min"]
+            xmax = filedata[f"x{d}max"]
+            data[xf] = np.linspace(xmin, xmax, nx + 1, dtype=dtype)
+        data[xv] = np.empty(nx, dtype=dtype)
+        for i in range(nx):
+            data[xv][i] = center_funcs[d - 1](data[xf][i], data[xf][i + 1])
+
+    # Create list of quantities
+    if quantities is None:
+        quantities = filedata["var_names"]
+
+    # Account for selection
+    i_min, i_max = 0, nx1
+    j_min, j_max = 0, nx2
+    k_min, k_max = 0, nx3
+    if x1_min is not None:
+        i_min = max(i_min, np.searchsorted(data["x1f"], x1_min))
+    if x1_max is not None:
+        i_max = min(i_max, np.searchsorted(data["x1f"], x1_max))
+    if x2_min is not None:
+        j_min = max(j_min, np.searchsorted(data["x2f"], x2_min))
+    if x2_max is not None:
+        j_max = min(j_max, np.searchsorted(data["x2f"], x2_max))
+    if x3_min is not None:
+        k_min = max(k_min, np.searchsorted(data["x3f"], x3_min))
+    if x3_max is not None:
+        k_max = min(k_max, np.searchsorted(data["x3f"], x3_max))
+
+    # Prepare arrays for data and bookkeeping
+    if new_data:
+        for q in quantities:
+            data[q] = np.zeros(
+                (k_max - k_min, j_max - j_min, i_max - i_min), dtype=dtype
+            )
+        if return_levels:
+            data["Levels"] = np.empty(
+                (k_max - k_min, j_max - j_min, i_max - i_min), dtype=np.int32
+            )
+    else:
+        for q in quantities:
+            data[q].fill(0.0)
+    if not subsample and not fast_restrict and max_level > level:
+        restricted_data = np.zeros((lx3, lx2, lx1), dtype=bool)
+
+    # Step 3: Process each block
+    for block_num in range(filedata["n_mbs"]):
+        block_level = levels[block_num]
+        block_location = logical_locations[block_num]
+
+        # Implement logic for prolongation, restriction, subsampling
+        if block_level <= level:
+            s = 2 ** (level - block_level)
+            il_d = block_location[0] * block_size[0] * s if nx1 > 1 else 0
+            jl_d = block_location[1] * block_size[1] * s if nx2 > 1 else 0
+            kl_d = block_location[2] * block_size[2] * s if nx3 > 1 else 0
+            iu_d = il_d + block_size[0] * s if nx1 > 1 else 1
+            ju_d = jl_d + block_size[1] * s if nx2 > 1 else 1
+            ku_d = kl_d + block_size[2] * s if nx3 > 1 else 1
+
+            il_s = max(il_d, i_min) - il_d
+            jl_s = max(jl_d, j_min) - jl_d
+            kl_s = max(kl_d, k_min) - kl_d
+            iu_s = min(iu_d, i_max) - il_d
+            ju_s = min(ju_d, j_max) - jl_d
+            ku_s = min(ku_d, k_max) - kl_d
+
+            if il_s >= iu_s or jl_s >= ju_s or kl_s >= ku_s:
+                continue
+
+            il_d = max(il_d, i_min) - i_min
+            jl_d = max(jl_d, j_min) - j_min
+            kl_d = max(kl_d, k_min) - k_min
+            iu_d = min(iu_d, i_max) - i_min
+            ju_d = min(ju_d, j_max) - j_min
+            ku_d = min(ku_d, k_max) - k_min
+
+            for q in quantities:
+                block_data = filedata["mb_data"][q][block_num]
+                if s > 1:
+                    block_data = np.repeat(
+                        np.repeat(np.repeat(block_data, s, axis=2), s, axis=1),
+                        s,
+                        axis=0,
+                    )
+                data[q][kl_d:ku_d, jl_d:ju_d, il_d:iu_d] = block_data[
+                    kl_s:ku_s, jl_s:ju_s, il_s:iu_s
+                ]
+        else:
+            # Implement restriction logic here (similar to athdf function)
+            pass
+
+        if return_levels:
+            data["Levels"][kl_d:ku_d, jl_d:ju_d, il_d:iu_d] = block_level
+
+    # Step 4: Finalize data
+    if level < max_level and not subsample and not fast_restrict:
+        # Remove volume factors from restricted data
+        for loc3 in range(lx3):
+            for loc2 in range(lx2):
+                for loc1 in range(lx1):
+                    if restricted_data[loc3, loc2, loc1]:
+                        il = loc1 * block_size[0]
+                        jl = loc2 * block_size[1]
+                        kl = loc3 * block_size[2]
+                        iu = il + block_size[0]
+                        ju = jl + block_size[1]
+                        ku = kl + block_size[2]
+                        il = max(il, i_min) - i_min
+                        jl = max(jl, j_min) - j_min
+                        kl = max(kl, k_min) - k_min
+                        iu = min(iu, i_max) - i_min
+                        ju = min(ju, j_max) - j_min
+                        ku = min(ku, k_max) - k_min
+                        for k in range(kl, ku):
+                            for j in range(jl, ju):
+                                for i in range(il, iu):
+                                    x1m, x1p = data["x1f"][i], data["x1f"][i + 1]
+                                    x2m, x2p = data["x2f"][j], data["x2f"][j + 1]
+                                    x3m, x3p = data["x3f"][k], data["x3f"][k + 1]
+                                    vol = vol_func(x1m, x1p, x2m, x2p, x3m, x3p)
+                                    for q in quantities:
+                                        data[q][k, j, i] /= vol
+
+    # Add metadata
+    data["Time"] = filedata["time"]
+    data["NumCycles"] = filedata["cycle"]
+    data["MaxLevel"] = max_level
+
+    return data
+
+
+
 # Read z4c.horizon_summary_%d.txt files.
 def horizon(filename):
     # Find the headers.
