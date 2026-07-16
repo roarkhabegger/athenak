@@ -62,15 +62,14 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
       }
       par_for("part_update",DevExeSpace(),0,(nprtcl_thispack-1),
       KOKKOS_LAMBDA(const int p) { //Currently not any different than drift
-        //int m = pi(PGID,p) - gids;
+        int m = pi(PGID,p) - gids;
         //int ip = (pr(IPX,p) - mbsize.d_view(m).x1min)/mbsize.d_view(m).dx1 + is;
         //int jp = (pr(IPY,p) - mbsize.d_view(m).x2min)/mbsize.d_view(m).dx2 + js;
         //int kp = (pr(IPZ,p) - mbsize.d_view(m).x3min)/mbsize.d_view(m).dx3 + ks;
         auto &b0_ = pmy_pack->pmb->b0;
         auto &e0_ = pmy_pack->pmb->efld;
-        auto &u0_ = pmy_pack->pmb->ufld;
-        auto &qom = 1 //PLACEHOLDER
-        auto &gamma = 1 //PLACEHOLDER
+        auto &u0_ = pmy_pack->pmb->u0;
+        auto &qom = charge_over_mass;
 
         //Push by half step using current velocities
         pr(IPX,p) += 0.5*dt_*pr(IPVX,p);
@@ -81,7 +80,7 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
         Real E[3], B[3];
         Real x[3] = {pr(IPX,p), pr(IPY,p), pr(IPZ,p)};
 
-        InterpolateFields(x, b0_, e0_, u0_, mbsize, indcs, 0, E, B);
+        InterpolateFields(x, b0_, e0_, u0_, mbsize, indcs, m, E, B);
 
         //Propogate velocities by electric field, half step
         uE[0] = pr(IPVX,p) + 0.5*dt_*qom*E[0];

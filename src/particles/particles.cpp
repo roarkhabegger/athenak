@@ -59,6 +59,7 @@ Particles::Particles(MeshBlockPack *ppack, ParameterInput *pin) :
     if (ppush.compare("drift") == 0) {
       pusher = ParticlesPusher::drift;
     } else if (ppush.compare("boris") == 0) {
+      charge_over_mass = pin->GetOrAddReal("particles","charge_over_mass",1.0);
       pusher = ParticlesPusher::boris;
     } else {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__

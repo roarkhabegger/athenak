@@ -498,6 +498,7 @@ void InterpolateFields( const Real * prtcl_x, const DvceFaceFld4D<Real> &b0_, co
 	Dy = (x2max - x2min)/indcs.nx2;
 	Dz = (x3max - x3min)/indcs.nx3;
 	//Interpolate fluid velocity at new particle location x1, x2, x3
+	//Interpolation doesn't currently work right, considering fluid velocities are cell-centered, not face-centered.
 	Real u[3];
 	u[0] = u0_(m, IM1, kp, jp, ip) + (prtcl_x[0] - x1v)*(u0_(m, IM1, kp, jp, ip+1) - u0_(m, IM1, kp, jp, ip))/Dx;
 	u[0] += u0_(m, IM1, kp, jp, ip) + (prtcl_x[1] - x2v)*(u0_(m, IM1, kp, jp+1, ip) - u0_(m, IM1, kp, jp, ip))/Dx;
