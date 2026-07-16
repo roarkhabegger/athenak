@@ -20,7 +20,6 @@ namespace particles {
 //  \brief
 
 TaskStatus Particles::Push(Driver *pdriver, int stage) {
-  //auto &indcs = pmy_pack->pmesh->mb_indcs;
   //int is = indcs.is;
   //int js = indcs.js;
   //int ks = indcs.ks;
@@ -31,7 +30,7 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
   //auto &pi = prtcl_idata;
   auto &pr = prtcl_rdata;
   auto dt_ = (pmy_pack->pmesh->dt);
-  //auto gids = pmy_pack->gids;
+  auto gids = pmy_pack->gids;
 
   switch (pusher) {
     case ParticlesPusher::drift:
@@ -62,13 +61,13 @@ TaskStatus Particles::Push(Driver *pdriver, int stage) {
       }
       par_for("part_update",DevExeSpace(),0,(nprtcl_thispack-1),
       KOKKOS_LAMBDA(const int p) { //Currently not any different than drift
-        int m = pi(PGID,p) - gids;
+        int m = prtcl_idata(PGID,p) - gids;
         //int ip = (pr(IPX,p) - mbsize.d_view(m).x1min)/mbsize.d_view(m).dx1 + is;
         //int jp = (pr(IPY,p) - mbsize.d_view(m).x2min)/mbsize.d_view(m).dx2 + js;
         //int kp = (pr(IPZ,p) - mbsize.d_view(m).x3min)/mbsize.d_view(m).dx3 + ks;
-        auto &b0_ = pmy_pack->pmb->b0;
-        auto &e0_ = pmy_pack->pmb->efld;
-        auto &u0_ = pmy_pack->pmb->u0;
+        auto &b0_ = pmy_pack->pmhd->b0;
+        auto &e0_ = pmy_pack->pmhd->efld;
+        auto &u0_ = pmy_pack->pmhd->u0;
         auto &qom = charge_over_mass;
 
         //Push by half step using current velocities
