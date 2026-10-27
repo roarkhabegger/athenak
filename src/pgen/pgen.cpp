@@ -59,6 +59,19 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm) :
                 << "by SetProblemData()." << std::endl;
       exit(EXIT_FAILURE);
     }
+    // Warn: user BCs are applied to the fine arrays only. The coarse-array path used by
+    // prolongation is not filled by user BCs (see UserBoundaryFnPtr in pgen.hpp), so a
+    // fine/coarse boundary that coincides with a physical (user) boundary can
+    // prolongate from unfilled coarse ghosts and trigger C2P failures etc.
+    // Keep refinement away from user-boundary faces.
+    if (pm->multilevel && global_variable::my_rank == 0) {
+      std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "User-defined boundary conditions are combined with SMR/AMR. User BCs "
+                << "are only applied to the fine arrays, not the coarse arrays used "
+                << "for prolongation. Avoid refining at user-boundary faces, otherwise "
+                << "prolongation may read unfilled coarse ghost zones (e.g. C2P fail.)."
+                << std::endl;
+    }
   }
   // Check that user defined srcterms were enrolled if needed
   if (user_srcs) {
@@ -618,6 +631,13 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   // second argument true since this IS a restart
   CallProblemGenerator(pin, true);
 
+  // Read cyclic zoom restart data if enabled
+  if (pm->pzoom != nullptr && pm->pzoom->read_rst) {
+    // calculate offset of zoom data, i.e., after all previous data
+    IOWrapperSizeT zoom_offset = headeroffset + data_size * pm->nmb_total;
+    pm->pzoom->ReadRestartFile(resfile, zoom_offset, single_file_per_rank);
+  }
+
   // Check that user defined BCs were enrolled if needed
   if (user_bcs) {
     if (user_bcs_func == nullptr) {
@@ -625,6 +645,16 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
                 << std::endl << "User BCs specified in <mesh> block, but not enrolled "
                 << "during restart by SetProblemData()." << std::endl;
       exit(EXIT_FAILURE);
+    }
+    // See note in the non-restart constructor: user BCs only fill the fine arrays, so
+    // refinement at user-boundary faces can prolongate from unfilled coarse ghost zones.
+    if (pm->multilevel && global_variable::my_rank == 0) {
+      std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "User-defined boundary conditions are combined with SMR/AMR. User BCs "
+                << "are only applied to the fine arrays, not the coarse arrays used "
+                << "for prolongation. Avoid refining at user-boundary faces, otherwise "
+                << "prolongation may read unfilled coarse ghost zones (e.g. C2P fail.)."
+                << std::endl;
     }
   }
   // Check that user defined srcterms were enrolled if needed
@@ -900,6 +930,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     BondiAccretion(pin, is_restart);
   } else if (pgen_fun_name.compare("cshock") == 0) {
     CShock(pin, is_restart);
+  } else if (pgen_fun_name.compare("divb_amr") == 0) {
+    DivBAMR(pin, is_restart);
   } else if (pgen_fun_name.compare("diffusion") == 0) {
     Diffusion(pin, is_restart);
   } else if (pgen_fun_name.compare("linear_wave") == 0) {
@@ -924,6 +956,14 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     Z4cBoostedPuncture(pin, is_restart);
   } else if (pgen_fun_name.compare("z4c_linear_wave") == 0) {
     Z4cLinearWave(pin, is_restart);
+  } else if (pgen_fun_name.compare("diffusion") == 0) {
+    Diffusion(pin, is_restart);
+  } else if (pgen_fun_name.compare("gravity") == 0) {
+    SelfGravity(pin, is_restart);
+  } else if (pgen_fun_name.compare("binary_gravity") == 0) {
+    BinaryGravity(pin, is_restart);
+  } else if (pgen_fun_name.compare("be_collapse") == 0) {
+    BECollapse(pin, is_restart);
 
   // pre-defined unit tests
   } else if (pgen_fun_name.compare("eos_compose") == 0) {
