@@ -26,6 +26,7 @@
 #include "z4c/compact_object_tracker.hpp"
 #include "z4c/z4c.hpp"
 #include "radiation/radiation.hpp"
+#include "craw/craw.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "pgen.hpp"
 
@@ -128,8 +129,12 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   adm::ADM* padm = pm->pmb_pack->padm;
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   radiation::Radiation* prad=pm->pmb_pack->prad;
+  craw::CosmicRayAW* pcraw=pm->pmb_pack->pcraw;
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
-  int nrad = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0;
+  int nrad = 0, ncraw = 0, nhydro = 0, nmhd = 0, nforce = 3, nadm = 0, nz4c = 0;
+  if (pcraw != nullptr) {
+    ncraw = craw::CosmicRayAW::nvars;
+  }
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
   }
@@ -250,6 +255,9 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   }
   if (prad != nullptr) {
     data_size_ += nout1*nout2*nout3*nrad*sizeof(Real);   // rad i0
+  }
+  if (pcraw != nullptr) {
+    data_size_ += nout1*nout2*nout3*ncraw*sizeof(Real);  // craw u0
   }
   if (pturb != nullptr) {
     data_size_ += nout1*nout2*nout3*nforce*sizeof(Real); // forcing
@@ -503,6 +511,46 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     Kokkos::deep_copy(Kokkos::subview(prad->i0, std::make_pair(0,nmb), Kokkos::ALL,
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
     offset_myrank += nout1*nout2*nout3*nrad*sizeof(Real);   // radiation i0
+    myoffset = offset_myrank;
+  }
+
+  if (pcraw != nullptr) {
+    Kokkos::realloc(ccin, nmb, ncraw, nout3, nout2, nout1);
+    for (int m=0;  m<noutmbs_max; ++m) {
+      // every rank has a MB to read, so read collectively
+      if (m < noutmbs_min) {
+        // get ptr to cell-centered MeshBlock data
+        auto mbptr = Kokkos::subview(ccin, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                     Kokkos::ALL);
+        size_t mbcnt = mbptr.size();
+        if (resfile.Read_Reals_at_all(mbptr.data(), mbcnt, myoffset,
+                                      single_file_per_rank) != mbcnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "CC craw data not read correctly from rst file, "
+                    << "restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        myoffset += data_size;
+
+      // some ranks are finished writing, so use non-collective read
+      } else if (m < pm->nmb_thisrank) {
+        // get ptr to MeshBlock data
+        auto mbptr = Kokkos::subview(ccin, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                     Kokkos::ALL);
+        size_t mbcnt = mbptr.size();
+        if (resfile.Read_Reals_at(mbptr.data(), mbcnt, myoffset,
+                                  single_file_per_rank) != mbcnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "CC craw data not read correctly from rst file, "
+                    << "restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        myoffset += data_size;
+      }
+    }
+    Kokkos::deep_copy(Kokkos::subview(pcraw->u0, std::make_pair(0,nmb), Kokkos::ALL,
+                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
+    offset_myrank += nout1*nout2*nout3*ncraw*sizeof(Real);  // craw u0
     myoffset = offset_myrank;
   }
 

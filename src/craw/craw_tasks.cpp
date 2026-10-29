@@ -16,6 +16,7 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "mesh/mesh.hpp"
+#include "mesh/mesh_refinement.hpp"
 #include "driver/driver.hpp"
 #include "bvals/bvals.hpp"
 #include "craw/craw.hpp"
@@ -60,17 +61,19 @@ void CosmicRayAW::AssembleCRAWTasks(
 // before_stagen
 
 //! \fn TaskStatus CosmicRayAW::InitRecv
-//! \brief TODO(you): post MPI receives for u
+//! \brief Post MPI receives for u
 TaskStatus CosmicRayAW::InitRecv(Driver *, int) {
-  return TaskStatus::complete;
+  TaskStatus tstat = pbval_u->InitRecv(nvars);
+  return tstat;
 }
 
 //----------------------------------------------------------------------------------------
 // stagen
 
 //! \fn TaskStatus CosmicRayAW::CopyCons
-//! \brief TODO(you): copy u0 -> u1 at the start of the stage
+//! \brief Copy u0 -> u1 at the start of the stage
 TaskStatus CosmicRayAW::CopyCons(Driver *, int) {
+  Kokkos::deep_copy(DevExeSpace(), u1, u0);
   return TaskStatus::complete;
 }
 
@@ -105,32 +108,111 @@ TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *, int) {
 }
 
 //! \fn TaskStatus CosmicRayAW::RestrictU
-//! \brief TODO(you): restrict u to coarse_u0 for SMR/AMR
-TaskStatus CosmicRayAW::RestrictU(Driver *, int) {
+//! \brief Restrict u to coarse_u0 for SMR/AMR (only with multilevel grids)
+TaskStatus CosmicRayAW::RestrictU(Driver *pdrive, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(u0, coarse_u0);
+  }
   return TaskStatus::complete;
 }
 
 //! \fn TaskStatus CosmicRayAW::SendU
-//! \brief TODO(you): send u boundary data
-TaskStatus CosmicRayAW::SendU(Driver *, int) {
-  return TaskStatus::complete;
+//! \brief Pack and send cell-centered u boundary data
+TaskStatus CosmicRayAW::SendU(Driver *pdrive, int stage) {
+  TaskStatus tstat = pbval_u->PackAndSendCC(u0, coarse_u0);
+  return tstat;
 }
 
 //! \fn TaskStatus CosmicRayAW::RecvU
-//! \brief TODO(you): receive u boundary data
-TaskStatus CosmicRayAW::RecvU(Driver *, int) {
-  return TaskStatus::complete;
+//! \brief Receive and unpack cell-centered u boundary data
+TaskStatus CosmicRayAW::RecvU(Driver *pdrive, int stage) {
+  TaskStatus tstat = pbval_u->RecvAndUnpackCC(u0, coarse_u0);
+  return tstat;
 }
 
 //! \fn TaskStatus CosmicRayAW::ApplyPhysicalBCs
-//! \brief TODO(you): apply physical boundary conditions to u
-TaskStatus CosmicRayAW::ApplyPhysicalBCs(Driver *, int) {
+//! \brief Apply physical boundary conditions to u.
+//! Outflow (zero-gradient) matches hydro, MHD, and radiation: each ghost zone copies the
+//! nearest interior cell. Reflect and inflow are not implemented yet, because which CR
+//! components change sign or take inflow values is a physics decision.
+TaskStatus CosmicRayAW::ApplyPhysicalBCs(Driver *pdrive, int stage) {
+  // do not apply BCs if domain is strictly periodic
+  if (pmy_pack->pmesh->strictly_periodic) return TaskStatus::complete;
+
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int n1 = indcs.nx1 + 2*ng;
+  int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng) : 1;
+  int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng) : 1;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &mb_bcs = pmy_pack->pmb->mb_bcs;
+  auto &pm = pmy_pack->pmesh;
+  auto u0_ = u0;
+
+  // x1 faces
+  if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
+    par_for("crawbc_x1", DevExeSpace(), 0,(nmb-1),0,(nvars-1),0,(n3-1),0,(n2-1),
+    KOKKOS_LAMBDA(int m, int n, int k, int j) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::outflow) {
+        for (int i=0; i<ng; ++i) {
+          u0_(m,n,k,j,is-i-1) = u0_(m,n,k,j,is);
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::outflow) {
+        for (int i=0; i<ng; ++i) {
+          u0_(m,n,k,j,ie+i+1) = u0_(m,n,k,j,ie);
+        }
+      }
+    });
+  }
+
+  // x2 faces
+  if (pm->mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic) {
+    par_for("crawbc_x2", DevExeSpace(), 0,(nmb-1),0,(nvars-1),0,(n3-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int n, int k, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::outflow) {
+        for (int j=0; j<ng; ++j) {
+          u0_(m,n,k,js-j-1,i) = u0_(m,n,k,js,i);
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::outflow) {
+        for (int j=0; j<ng; ++j) {
+          u0_(m,n,k,je+j+1,i) = u0_(m,n,k,je,i);
+        }
+      }
+    });
+  }
+
+  // x3 faces
+  if (pm->mesh_bcs[BoundaryFace::inner_x3] != BoundaryFlag::periodic) {
+    par_for("crawbc_x3", DevExeSpace(), 0,(nmb-1),0,(nvars-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int n, int j, int i) {
+      if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::outflow) {
+        for (int k=0; k<ng; ++k) {
+          u0_(m,n,ks-k-1,j,i) = u0_(m,n,ks,j,i);
+        }
+      }
+      if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::outflow) {
+        for (int k=0; k<ng; ++k) {
+          u0_(m,n,ke+k+1,j,i) = u0_(m,n,ke,j,i);
+        }
+      }
+    });
+  }
+
   return TaskStatus::complete;
 }
 
 //! \fn TaskStatus CosmicRayAW::Prolongate
-//! \brief TODO(you): prolongate u at fine/coarse boundaries with SMR/AMR
-TaskStatus CosmicRayAW::Prolongate(Driver *, int) {
+//! \brief Prolongate u at fine/coarse boundaries with SMR/AMR
+TaskStatus CosmicRayAW::Prolongate(Driver *pdrive, int stage) {
+  if (pmy_pack->pmesh->multilevel) {  // only prolongate with SMR/AMR
+    pbval_u->FillCoarseInBndryCC(u0, coarse_u0);
+    pbval_u->ProlongateCC(u0, coarse_u0);
+  }
   return TaskStatus::complete;
 }
 
@@ -147,15 +229,17 @@ TaskStatus CosmicRayAW::NewTimeStep(Driver *, int) {
 // after_stagen
 
 //! \fn TaskStatus CosmicRayAW::ClearSend
-//! \brief TODO(you): check that all MPI sends for u have completed
+//! \brief Check that all MPI sends for u have completed
 TaskStatus CosmicRayAW::ClearSend(Driver *, int) {
-  return TaskStatus::complete;
+  TaskStatus tstat = pbval_u->ClearSend();
+  return tstat;
 }
 
 //! \fn TaskStatus CosmicRayAW::ClearRecv
-//! \brief TODO(you): check that all MPI receives for u have completed
+//! \brief Check that all MPI receives for u have completed
 TaskStatus CosmicRayAW::ClearRecv(Driver *, int) {
-  return TaskStatus::complete;
+  TaskStatus tstat = pbval_u->ClearRecv();
+  return tstat;
 }
 
 } // namespace craw
