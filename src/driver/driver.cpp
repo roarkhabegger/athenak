@@ -832,5 +832,18 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
     (void) prad->ApplyPhysicalBCs(this, 0); // fine grid BCs
   }
 
+  // Initialize craw: ghost zones of u (everywhere)
+  craw::CosmicRayAW *pcraw = pm->pmb_pack->pcraw;
+  if (pcraw != nullptr) {
+    (void) pcraw->RestrictU(this, 0);
+    (void) pcraw->InitRecv(this, -1);  // stage < 0 suppresses InitFluxRecv
+    (void) pcraw->SendU(this, 0);
+    (void) pcraw->ClearSend(this, -1);
+    (void) pcraw->ClearRecv(this, -1);
+    (void) pcraw->RecvU(this, 0);
+    (void) pcraw->Prolongate(this, 0); // coarse grid BCs and prolongation
+    (void) pcraw->ApplyPhysicalBCs(this, 0); // fine grid BCs
+  }
+
   return;
 }
