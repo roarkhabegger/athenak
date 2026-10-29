@@ -29,6 +29,7 @@
 #include "srcterms/srcterms.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "gravity/gravity.hpp"
+#include "craw/craw.hpp"
 #include "outputs.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -174,6 +175,13 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << "Output of gravity potential requested in <output> block '"
        << out_params.block_name << "' but gravity object not constructed."
        << std::endl << "Input file is likely missing a <gravity> block" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if (ivar==154 && (pm->pmb_pack->pcraw == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of craw_u requested in <output> block '"
+       << out_params.block_name << "' but craw object not constructed."
+       << std::endl << "Input file is likely missing a <craw> block" << std::endl;
     exit(EXIT_FAILURE);
   }
 
@@ -615,6 +623,14 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars.emplace_back("force1",0,&(pm->pmb_pack->pturb->force));
       outvars.emplace_back("force2",1,&(pm->pmb_pack->pturb->force));
       outvars.emplace_back("force3",2,&(pm->pmb_pack->pturb->force));
+    }
+
+    // cosmic rays + Alfven waves: all four conserved variables in u0
+    if (variable.compare("craw_u") == 0) {
+      outvars.emplace_back("craw_e",craw::ICRE,&(pm->pmb_pack->pcraw->u0));
+      outvars.emplace_back("craw_f",craw::ICRF,&(pm->pmb_pack->pcraw->u0));
+      outvars.emplace_back("craw_awp",craw::IAWP,&(pm->pmb_pack->pcraw->u0));
+      outvars.emplace_back("craw_awm",craw::IAWM,&(pm->pmb_pack->pcraw->u0));
     }
 
     // gravity potential

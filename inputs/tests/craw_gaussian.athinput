@@ -1,0 +1,66 @@
+# AthenaXXX input file for craw (cosmic-ray + Alfven wave) module, standalone test.
+# No <hydro> or <mhd> block: the craw module runs on its own.
+# Initial condition: 1-D Gaussian in the CR energy density on a zero background.
+
+<comment>
+problem   = craw Gaussian (no fluid)
+
+<job>
+basename  = CRAWGauss   # basename of output filenames, serves as problem ID
+
+<mesh>
+nghost    = 3           # Number of ghost cells
+nx1       = 128         # Number of cells in X1-direction
+x1min     = 0.0         # minimum value of X1
+x1max     = 1.0         # maximum value of X1
+ix1_bc    = periodic    # Inner-X1 boundary condition flag
+ox1_bc    = periodic    # Outer-X1 boundary condition flag
+
+nx2       = 1           # Number of cells in X2-direction
+x2min     = -0.5        # minimum value of X2
+x2max     = 0.5         # maximum value of X2
+ix2_bc    = periodic    # Inner-X2 boundary condition flag
+ox2_bc    = periodic    # Outer-X2 boundary condition flag
+
+nx3       = 1           # Number of cells in X3-direction
+x3min     = -0.5        # minimum value of X3
+x3max     = 0.5         # maximum value of X3
+ix3_bc    = periodic    # Inner-X3 boundary condition flag
+ox3_bc    = periodic    # Outer-X3 boundary condition flag
+
+<meshblock>
+nx1       = 128         # Number of cells in each MeshBlock, X1-dir
+nx2       = 1           # Number of cells in each MeshBlock, X2-dir
+nx3       = 1           # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic     # dynamic/kinematic/static
+integrator = rk2         # time integrator
+cfl_number = 0.3         # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1          # cycle limit (no limit if <0)
+tlim       = 0.5         # time limit
+ndiag      = 1           # cycles between diagnostic output
+
+<craw>
+feedback   = false       # CR feedback on the fluid (no fluid here, keep off)
+
+<problem>
+pgen_name  = craw_gaussian  # problem generator name
+amp        = 1.0         # peak amplitude of the CR energy Gaussian
+bkg        = 0.0         # uniform background CR energy density
+x0         = 0.5         # center of the Gaussian
+sigma      = 0.05        # standard deviation of the Gaussian (5% of domain length)
+
+<output1>
+file_type   = hst        # history data dump
+data_format = %12.5e     # Optional data format string
+dt          = 0.01       # time increment between outputs
+
+<output2>
+file_type   = tab        # tabular data dump
+variable    = craw_u     # all four CR/wave variables
+data_format = %12.5e     # Optional data format string
+dt          = 0.1        # time increment between outputs
+slice_x2    = 0.0        # slice in x2
+slice_x3    = 0.0        # slice in x3
+ghost_zones = false      # switch to output ghost cells

@@ -22,6 +22,7 @@
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
 #include "coordinates/adm.hpp"
+#include "craw/craw.hpp"
 #include "outputs.hpp"
 
 //----------------------------------------------------------------------------------------
@@ -49,6 +50,10 @@ HistoryOutput::HistoryOutput(ParameterInput *pin, Mesh *pm, OutputParameters op)
   if (pm->pmb_pack->pz4c != nullptr) {
     hist_data.emplace_back(PhysicsModule::SpaceTimeDynamics);
   }
+
+  if (pm->pmb_pack->pcraw != nullptr) {
+    hist_data.emplace_back(PhysicsModule::CosmicRayAlfvenWave);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -64,6 +69,8 @@ void HistoryOutput::LoadOutputData(Mesh *pm) {
       LoadMHDHistoryData(&data, pm);
     } else if (data.physics == PhysicsModule::SpaceTimeDynamics) {
       LoadZ4cHistoryData(&data, pm);
+    } else if (data.physics == PhysicsModule::CosmicRayAlfvenWave) {
+      LoadCRAWHistoryData(&data, pm);
     } else if (data.physics == PhysicsModule::UserDefined) {
       (pm->pgen->user_hist_func)(&data, pm);
     }
@@ -150,6 +157,69 @@ void HistoryOutput::LoadHydroHistoryData(HistoryData *pdata, Mesh *pm) {
     for (int s=0; s<nscalars_; ++s) {
       hvars.the_array[nhydro_+3+s] = vol*u0_(m,nhydro_+s,k,j,i);
     }
+
+    // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
+    for (int n=nhist_; n<NHISTORY_VARIABLES; ++n) {
+      hvars.the_array[n] = 0.0;
+    }
+
+    // sum into parallel reduce
+    mb_sum += hvars;
+  }, Kokkos::Sum<array_sum::GlobalSum>(sum_this_mb));
+
+  // store data into hdata array
+  for (int n=0; n<pdata->nhist; ++n) {
+    pdata->hdata[n] = sum_this_mb.the_array[n];
+  }
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void HistoryOutput::LoadCRAWHistoryData()
+//  \brief Volume-integrated CR energy, CR flux, and forward/backward Alfven wave
+//  energies over the domain, computed from pcraw->u0. The CR flux total is the
+//  volume-weighted sum of the flux component, not a face-flux integral.
+
+void HistoryOutput::LoadCRAWHistoryData(HistoryData *pdata, Mesh *pm) {
+  // set number of and names of history variables for craw
+  pdata->nhist = 4;
+  pdata->label[0] = "CR-E";
+  pdata->label[1] = "CR-F";
+  pdata->label[2] = "AW+-E";
+  pdata->label[3] = "AW--E";
+
+  // capture class variables for kernel
+  auto &u0_ = pm->pmb_pack->pcraw->u0;
+  auto &size = pm->pmb_pack->pmb->mb_size;
+  int &nhist_ = pdata->nhist;
+
+  // loop over all MeshBlocks in this pack
+  auto &indcs = pm->pmb_pack->pmesh->mb_indcs;
+  int is = indcs.is; int nx1 = indcs.nx1;
+  int js = indcs.js; int nx2 = indcs.nx2;
+  int ks = indcs.ks; int nx3 = indcs.nx3;
+  const int nmkji = (pm->pmb_pack->nmb_thispack)*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+  array_sum::GlobalSum sum_this_mb;
+  Kokkos::parallel_reduce("HistSumsCRAW",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum) {
+    // compute n,k,j,i indices of thread
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+
+    array_sum::GlobalSum hvars;
+    hvars.the_array[0] = vol*u0_(m,craw::ICRE,k,j,i);
+    hvars.the_array[1] = vol*u0_(m,craw::ICRF,k,j,i);
+    hvars.the_array[2] = vol*u0_(m,craw::IAWP,k,j,i);
+    hvars.the_array[3] = vol*u0_(m,craw::IAWM,k,j,i);
 
     // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
     for (int n=nhist_; n<NHISTORY_VARIABLES; ++n) {
@@ -409,6 +479,9 @@ void HistoryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
           fname.append(".z4c");
         case PhysicsModule::UserDefined:
           fname.append(".user");
+          break;
+        case PhysicsModule::CosmicRayAlfvenWave:
+          fname.append(".craw");
           break;
         default:
           break;

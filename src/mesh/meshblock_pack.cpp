@@ -27,6 +27,7 @@
 #include "diffusion/viscosity.hpp"
 #include "diffusion/resistivity.hpp"
 #include "radiation/radiation.hpp"
+#include "craw/craw.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "particles/particles.hpp"
 #include "units/units.hpp"
@@ -175,6 +176,16 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     prad->AssembleRadTasks(tl_map);
   } else {
     prad = nullptr;
+  }
+
+  // (5b) COSMIC RAYS + ALFVEN WAVES
+  // Create craw module and its tasks. 
+  if (pin->DoesBlockExist("craw")) {
+    pcraw = new craw::CosmicRayAW(this, pin);
+    nphysics++;
+    pcraw->AssembleCRAWTasks(tl_map);
+  } else {
+    pcraw = nullptr;
   }
 
   // (6) TURBULENCE DRIVER
