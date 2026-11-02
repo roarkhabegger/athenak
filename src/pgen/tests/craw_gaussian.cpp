@@ -57,8 +57,8 @@ void ProblemGenerator::CRAWGaussian(ParameterInput *pin, const bool restart) {
   int &ks = indcs.ks; int &ke = indcs.ke;
   auto &size = pmbp->pmb->mb_size;
   auto &u0 = pmbp->pcraw->u0;
-  // copy nvars to a local: the kernel runs on device and must not dereference host ptrs
-  int nvars = pmbp->pcraw->nvars;
+  // gamma_c for the initial flux, taken from the CR module so it matches the solver
+  Real gamma_c = pmbp->pcraw->gamma_cr;
 
   // initialize: uniform background everywhere, Gaussian added to CR energy, rest zero
   par_for("pgen_craw_gauss", DevExeSpace(), 0, (pmbp->nmb_thispack-1), ks, ke, js, je,
@@ -72,10 +72,14 @@ void ProblemGenerator::CRAWGaussian(ParameterInput *pin, const bool restart) {
     Real dx = x - x0;
     Real gauss = amp*exp(-0.5*dx*dx/(sigma*sigma));
 
-    for (int n = 0; n < nvars; ++n) {
-      u0(m,n,k,j,i) = 0.0;
-    }
-    u0(m,craw::ICRE,k,j,i) = bkg + gauss;
+    // E_c: Gaussian on the background. f_c: gamma_c * sign(x) * E_c.
+    // E_+-: (1 + g(x)) * 1e-10, with g(x) the same Gaussian profile.
+    Real Ec = bkg + gauss;
+    Real sgn = (x >= x0) ? 1.0 : -1.0;
+    u0(m,craw::ICRE,k,j,i) = Ec;
+    u0(m,craw::ICRF,k,j,i) = gamma_c*sgn*Ec;
+    u0(m,craw::IAWP,k,j,i) = (1.0 + gauss)*1.0e-6;
+    u0(m,craw::IAWM,k,j,i) = (1.0 + gauss)*1.0e-6;
   });
 
   return;

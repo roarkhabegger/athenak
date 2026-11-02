@@ -68,15 +68,29 @@ class CosmicRayAW {
   // Number of evolved variables, set by the last CRAWVariableIndex entry
   static constexpr int nvars = IAWM + 1;
 
+  // adiabatic index of the cosmic-ray gas (relativistic CRs: 4/3)
+  static constexpr Real gamma_cr = 4.0/3.0;
+
   // flags and coefficients (read from <craw> block)
-  // TODO(you): add parameters here, e.g. streaming/diffusion/damping coefficients
-  bool feedback;            // flag to enable/disable CR feedback on the fluid
+  // TODO(roark): add parameters here, e.g. streaming/diffusion/damping coefficients
+  Real v_max;               // reduced speed of light for the CR f_c equation
+  Real v_A;                 // Alfven speed; read only when no fluid is present
+  Real lorentz;             // Lorentz factor of the mono-energetic CR bin (fixed)
+  Real alpha_landau;        // nonlinear Landau damping coefficient (alpha)
+  Real atol;                // absolute tolerance for the source-term error estimate
+  Real rtol;                // relative tolerance for the source-term error estimate
+  Real m_cr;                // CR particle mass in code units (fixed, default proton mass)
+  Real B_code;              // standalone field (code units) used to set chi
+  Real chi_cr;              // chi = (9 pi/8) lorentz m c^3 B, B = B_code
+  bool has_fluid;           // true if hydro or MHD is present in the pack
 
   // conserved variables and their storage
   DvceArray5D<Real> u0;         // conserved CR/wave variables
   DvceArray5D<Real> u1;         // conserved variables at intermediate stage
+  int N_cr;                     // CR substeps per fluid timestep, used in NewTimeStep (ncr_sub)
   DvceArray5D<Real> coarse_u0;  // conserved variables on 2x coarser grid (for SMR/AMR)
-  DvceFaceFld5D<Real> uflx;     // spatial fluxes on zone faces
+  DvceFaceFld5D<Real> uflx;     // spatial fluxes on zone faces (exchanged)
+  DvceFaceFld5D<Real> uflx_aniso;  // anisotropic transport fluxes on zone faces
   Real dtnew;
 
   // Boundary communication buffers and functions for u
@@ -87,11 +101,12 @@ class CosmicRayAW {
 
   // functions...
   void AssembleCRAWTasks(std::map<std::string, std::shared_ptr<TaskList>> tl);
+  TaskID CRAWFluidFluxDependency(TaskID &own_copyu);
   // ...in "before_stagen" task list
   TaskStatus InitRecv(Driver *pdrive, int stage);
   // ...in "stagen" task list
   TaskStatus CopyCons(Driver *pdrive, int stage);
-  TaskStatus CalculateFluxes(Driver *pdrive, int stage);
+  TaskStatus CalculateAnisoFluxes(Driver *pdrive, int stage);
   TaskStatus SendFlux(Driver *pdrive, int stage);
   TaskStatus RecvFlux(Driver *pdrive, int stage);
   TaskStatus RKUpdate(Driver *pdrive, int stage);
