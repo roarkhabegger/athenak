@@ -51,6 +51,9 @@ MeshBlockPack::MeshBlockPack(Mesh *pm, int igids, int igide) :
   tl_map.insert(std::make_pair("before_parabolic_stagen",std::make_shared<TaskList>()));
   tl_map.insert(std::make_pair("parabolic_stagen",std::make_shared<TaskList>()));
   tl_map.insert(std::make_pair("after_parabolic_stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("before_craw_sub",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("craw_sub",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("after_craw_sub",std::make_shared<TaskList>()));
 }
 
 //----------------------------------------------------------------------------------------

@@ -58,34 +58,29 @@ void CosmicRayAW::AssembleCRAWTasks(
                               std::map<std::string, std::shared_ptr<TaskList>> tl) {
   TaskID none(0);
 
-  // "before_stagen" task list
-  id.irecv = tl["before_stagen"]->AddTask(&CosmicRayAW::InitRecv, this, none);
+  // "before_craw_sub" task list: post MPI receives for u before each subcycle
+  id.irecv = tl["before_craw_sub"]->AddTask(&CosmicRayAW::InitRecv, this, none);
 
-  // "stagen" task list
-  // The CR flux is computed alongside the fluid flux, from the same stage-start state
-  // (b0, w0) that the fluid Riemann solver reads. It must run before the fluid CT task,
-  // which overwrites b0 for this stage. Dependencies are taken from the fluid task IDs,
-  // which exist because the fluid assembly runs before AssembleCRAWTasks.
-  id.copyu   = tl["stagen"]->AddTask(&CosmicRayAW::CopyCons, this, none);
-  // CalculateAnisoFluxes needs both the fluid's stage-start state and this module's own
-  // CopyCons, so it waits on both. Dependencies combine as a bitfield with operator|.
-  TaskID fluid_dep = CRAWFluidFluxDependency(id.copyu);
-  TaskID flux_dep = fluid_dep | id.copyu;
-  id.flux    = tl["stagen"]->AddTask(&CosmicRayAW::CalculateAnisoFluxes, this, flux_dep);
-  id.sendf   = tl["stagen"]->AddTask(&CosmicRayAW::SendFlux, this, id.flux);
-  id.recvf   = tl["stagen"]->AddTask(&CosmicRayAW::RecvFlux, this, id.sendf);
-  id.rkupdt  = tl["stagen"]->AddTask(&CosmicRayAW::RKUpdate, this, id.recvf);
-  id.srctrms = tl["stagen"]->AddTask(&CosmicRayAW::CRAWSrcTerms, this, id.rkupdt);
-  id.restu   = tl["stagen"]->AddTask(&CosmicRayAW::RestrictU, this, id.srctrms);
-  id.sendu   = tl["stagen"]->AddTask(&CosmicRayAW::SendU, this, id.restu);
-  id.recvu   = tl["stagen"]->AddTask(&CosmicRayAW::RecvU, this, id.sendu);
-  id.prol    = tl["stagen"]->AddTask(&CosmicRayAW::Prolongate, this, id.recvu);
-  id.bcs     = tl["stagen"]->AddTask(&CosmicRayAW::ApplyPhysicalBCs, this, id.prol);
-  id.newdt   = tl["stagen"]->AddTask(&CosmicRayAW::NewTimeStep, this, id.bcs);
+  // "craw_sub" task list: one transport + source subcycle of size craw_dt_sub, run by the
+  // driver N_cr/2 times before and N_cr/2 times after the fluid RK stages. No RK weights.
+  id.flux    = tl["craw_sub"]->AddTask(&CosmicRayAW::CalculateAnisoFluxes, this, none);
+  id.sendf   = tl["craw_sub"]->AddTask(&CosmicRayAW::SendFlux, this, id.flux);
+  id.recvf   = tl["craw_sub"]->AddTask(&CosmicRayAW::RecvFlux, this, id.sendf);
+  id.rkupdt  = tl["craw_sub"]->AddTask(&CosmicRayAW::RKUpdate, this, id.recvf);
+  id.srctrms = tl["craw_sub"]->AddTask(&CosmicRayAW::CRAWSrcTerms, this, id.rkupdt);
+  id.restu   = tl["craw_sub"]->AddTask(&CosmicRayAW::RestrictU, this, id.srctrms);
+  id.sendu   = tl["craw_sub"]->AddTask(&CosmicRayAW::SendU, this, id.restu);
+  id.recvu   = tl["craw_sub"]->AddTask(&CosmicRayAW::RecvU, this, id.sendu);
+  id.prol    = tl["craw_sub"]->AddTask(&CosmicRayAW::Prolongate, this, id.recvu);
+  id.bcs     = tl["craw_sub"]->AddTask(&CosmicRayAW::ApplyPhysicalBCs, this, id.prol);
 
-  // "after_stagen" task list
-  id.csend = tl["after_stagen"]->AddTask(&CosmicRayAW::ClearSend, this, none);
-  id.crecv = tl["after_stagen"]->AddTask(&CosmicRayAW::ClearRecv, this, id.csend);
+  // "stagen" task list: NewTimeStep runs only on the last RK stage (gated inside), so it
+  // sets dtnew once per cycle, not once per craw subcycle.
+  id.newdt = tl["stagen"]->AddTask(&CosmicRayAW::NewTimeStep, this, none);
+
+  // "after_craw_sub" task list: finish MPI sends and receives after each subcycle
+  id.csend = tl["after_craw_sub"]->AddTask(&CosmicRayAW::ClearSend, this, none);
+  id.crecv = tl["after_craw_sub"]->AddTask(&CosmicRayAW::ClearRecv, this, id.csend);
 
   return;
 }
@@ -119,14 +114,42 @@ TaskStatus CosmicRayAW::CopyCons(Driver *, int stage) {
   return TaskStatus::complete;
 }
 
+//! \fn KOKKOS_INLINE_FUNCTION Real BnCell
+//! \brief Unit projection b_n = B_x/|B| of the cell-centred field on the x1 direction.
+//! Returns 1 when no MHD fluid is present (standalone CR runs keep the uniform field).
+//! A cell with zero field returns 0, so it carries no anisotropic transport.
+KOKKOS_INLINE_FUNCTION
+Real BnCell(const DvceArray5D<Real> &bcc, const bool use_mhd, const int m, const int k,
+            const int j, const int i) {
+  if (!use_mhd) return 1.0;
+  Real bx = bcc(m,IBX,k,j,i), by = bcc(m,IBY,k,j,i), bz = bcc(m,IBZ,k,j,i);
+  Real bmag = std::sqrt(bx*bx + by*by + bz*bz);
+  return (bmag > 0.0) ? bx/bmag : 0.0;
+}
+
+//! \fn KOKKOS_INLINE_FUNCTION Real BnFace
+//! \brief Interface projection b_n = B_x,face / |B_side| on one side of an x1 face. The
+//! normal component B_x is the constrained-transport face value, shared by both sides. The
+//! magnitude |B| is taken from the cell-centred field on that side (cell ic = i-1 or i).
+//! Standalone CR runs (no MHD) return 1.
+KOKKOS_INLINE_FUNCTION
+Real BnFace(const DvceArray5D<Real> &bcc, const DvceArray4D<Real> &bx1f, const bool use_mhd,
+            const int m, const int k, const int j, const int i_face, const int ic) {
+  if (!use_mhd) return 1.0;
+  Real bx = bx1f(m,k,j,i_face);
+  Real bxc = bcc(m,IBX,k,j,ic), byc = bcc(m,IBY,k,j,ic), bzc = bcc(m,IBZ,k,j,ic);
+  Real bmag = std::sqrt(bxc*bxc + byc*byc + bzc*bzc);
+  return (bmag > 0.0) ? bx/bmag : 0.0;
+}
+
 //! \fn TaskStatus CosmicRayAW::CalculateAnisoFluxes
-//! TODO(roark): x2/x3 face fluxes for multi-D; b_nL/b_nR from the field; varying-b S.
-//! \brief Conservative anisotropic transport fluxes for E_c and E_+-, written into
-//! uflx_aniso by assignment (no zeroing needed). Uniform field along x1 (b_n = 1):
-//!   E_c flux through a face  = b_n * f_c            (upwind on the sign of f_c)
-//!   E_+- flux through a face = +-b_n * v_A * E_+-   (upwind on the sign of the wave)
-//! The f_c face flux is S^2 E_c* with the Riemann star value E_c*, which is the
-//! conservative flux of the f_c equation for a uniform field.
+//! TODO(roark): x2/x3 face fluxes for multi-D.
+//! \brief Conservative anisotropic transport fluxes on x1 faces, written into uflx_aniso
+//! by assignment. The projections b_nL, b_nR and the Alfven speeds are cell-centred values
+//! from the MHD state; standalone CR runs use b_n = 1 and the input v_A.
+//!   E_c flux through a face  = (b_n f_c) - S/2 [E_c],   S = v_max sqrt(gamma_cr-1) max|b_n|
+//!   f_c slot stores the Riemann star value f_c*, not a flux. RKUpdate builds D^f from it.
+//!   E_+- flux through a face = +-(b_n v_A E_+-) - S_a/2 [E_+-],  S_a = max |(b_n v_A)_{L,R}|
 TaskStatus CosmicRayAW::CalculateAnisoFluxes(Driver *, int) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is, &ie = indcs.ie;
@@ -135,23 +158,25 @@ TaskStatus CosmicRayAW::CalculateAnisoFluxes(Driver *, int) {
   int nmb1 = pmy_pack->nmb_thispack - 1;
   auto u0_ = u0;
   auto fx1 = uflx_aniso.x1f;
+  bool use_mhd = (pmy_pack->pmhd != nullptr);
+  DvceArray5D<Real> bcc_ = use_mhd ? pmy_pack->pmhd->bcc0 : u0;
+  DvceArray4D<Real> bx1f_ = use_mhd ? pmy_pack->pmhd->b0.x1f : DvceArray4D<Real>();
+  DvceArray5D<Real> w0_  = use_mhd ? pmy_pack->pmhd->w0 : u0;
+  Real vA_sa = v_A;
   
   // gas constant for CR pressure, P_c = (gamma_cr - 1) E_c
   Real gm1 = gamma_cr - 1.0;
   Real vmax = v_max;
   Real vmax2 = vmax*vmax;
-  Real vA = v_A;
   Real sqrt_gm1 = std::sqrt(gm1);
 
-  // x1-faces: faces il..iu+1 for cells is..ie. Face i is the left face of cell i.
+  // x1-faces: faces is..ie+1 for cells is..ie. Face i is the left face of cell i.
   par_for("craw_aniso_x1", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    // projections of b onto the x1 face from the left and right cells.
-    // TODO(roark): replace these with b.x1 of the field in cells i-1 and i. Uniform
-    // field along x1 for now, so both are 1.
-    Real bnL = 1.0;
-    Real bnR = 1.0;
-    Real bmax = (bnL >bnR ? bnL : bnR);
+    // projections of b onto the x1 face from the cells i-1 (left) and i (right)
+    Real bnL = BnFace(bcc_, bx1f_, use_mhd, m, k, j, i, i-1);
+    Real bnR = BnFace(bcc_, bx1f_, use_mhd, m, k, j, i, i);
+    Real bmax = fmax(fabs(bnL), fabs(bnR));
 
     // field does not pierce the face: no anisotropic transport through it.
     // This also avoids dividing by S below, which vanishes when bmax = 0.
@@ -176,14 +201,17 @@ TaskStatus CosmicRayAW::CalculateAnisoFluxes(Driver *, int) {
       Real fc_star = 0.5*(u0_(m,ICRF,k,j,i-1) + u0_(m,ICRF,k,j,i)) 
                       - vmax2 * bLbar*gm1*(Ec_star- u0_(m,ICRE,k,j,i-1))/(2*S)
                       + vmax2 * bRbar*gm1*(Ec_star- u0_(m,ICRE,k,j,i))/(2*S);
-      fx1(m,ICRF,k,j,i) = S*fc_star;
+      fx1(m,ICRF,k,j,i) = fc_star;
 
       // E_+: moves at +v_A, so its upwind cell is the one to the left of the face
-      Real Sa = (vA*bnL > vA*bnR ? vA*bnL : vA*bnR);
-      fx1(m,IAWP,k,j,i) = (bnL * vA * u0_(m,IAWP,k,j,i-1) + bnR * vA * u0_(m,IAWP,k,j,i)) / 2.0
+      // b_n v_A = (B_x/|B|)(|B|/sqrt(rho)) = B_x/sqrt(rho): the |B| cancels, so use the face B_x
+      Real pL = use_mhd ? bx1f_(m,k,j,i)/std::sqrt(w0_(m,IDN,k,j,i-1)) : vA_sa;
+      Real pR = use_mhd ? bx1f_(m,k,j,i)/std::sqrt(w0_(m,IDN,k,j,i))   : vA_sa;
+      Real Sa = fmax(fabs(pL), fabs(pR));
+      fx1(m,IAWP,k,j,i) = (pL * u0_(m,IAWP,k,j,i-1) + pR * u0_(m,IAWP,k,j,i)) / 2.0
                           - Sa *(u0_(m,IAWP,k,j,i) - u0_(m,IAWP,k,j,i-1)) / 2.0;
       // E_-: moves at -v_A, so its upwind cell is the one to the right of the face
-      fx1(m,IAWM,k,j,i) = -1*(bnL * vA * u0_(m,IAWM,k,j,i-1) + bnR * vA * u0_(m,IAWM,k,j,i)) / 2.0
+      fx1(m,IAWM,k,j,i) = -1*(pL * u0_(m,IAWM,k,j,i-1) + pR * u0_(m,IAWM,k,j,i)) / 2.0
                           - Sa *(u0_(m,IAWM,k,j,i) - u0_(m,IAWM,k,j,i-1)) / 2.0;
       
     }
@@ -213,7 +241,10 @@ TaskStatus CosmicRayAW::RecvFlux(Driver *pdrive, int stage) {
 }
 
 //! \fn TaskStatus CosmicRayAW::RKUpdate
-//! \brief TODO(roark): x2/x3 flux divergence for multi-D.
+//! \brief Forward subcycle update with the flux divergence and the non-conservative f_c term.
+//! Wave speed per face and the smooth coefficient come from the cell-centred field:
+//!   S_{i+1/2} = v_max sqrt(gamma_cr-1) max(|b_i|, |b_{i+1}|),   H_i = (gamma_cr-1) v_max^2 b_i
+//! TODO(roark): x2/x3 flux divergence for multi-D.
 TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
@@ -221,16 +252,21 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
   int js = indcs.js, je = indcs.je;
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
 
-  Real &gam0 = pdriver->gam0[stage-1];
-  Real &gam1 = pdriver->gam1[stage-1];
-  Real beta_dt = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
+  // forward subcycle step: u <- u - dt_sub*divF (+ non-conservative term), no RK weights
+  Real beta_dt = pdriver->craw_dt_sub;
   int nmb1 = pmy_pack->nmb_thispack - 1;
   auto u0_ = u0;
-  auto u1_ = u1;
   auto flx1 = uflx_aniso.x1f;
   auto &mbsize = pmy_pack->pmb->mb_size;
-  Real S_cr = v_max*std::sqrt(gamma_cr - 1.0);  // uniform-field wave speed S
-  Real bi_x1 = 1.0;  // b_n of the cell along x1; uniform field for now (TODO: from B)
+  Real efloor_ = efloor;
+  Real wfloor_ = wfloor;
+  Real gm1 = gamma_cr - 1.0;
+  Real vmax = v_max;
+  Real vmax2 = vmax*vmax;
+  Real sqrt_gm1 = std::sqrt(gm1);
+  bool use_mhd = (pmy_pack->pmhd != nullptr);
+  DvceArray5D<Real> bcc_ = use_mhd ? pmy_pack->pmhd->bcc0 : u0;
+  DvceArray4D<Real> bx1f_ = use_mhd ? pmy_pack->pmhd->b0.x1f : DvceArray4D<Real>();
 
   // 1D (x1) update, same weights as hydro's RKUpdate. Loops over all nvars components.
   int scr_level = 0;
@@ -242,20 +278,30 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
 
     if (n == ICRF) {
       // non-conservative f_c term: linear fluctuations (path-conservative scheme).
-      // flx1 holds S*fc* at each face, so fc* = flx1/S_cr. The cell's own state is f_i.
-      //   D_L at right face i+1/2 = +S (f_i - fc*_{i+1/2})
-      //   D_R at left face  i-1/2 = -S (f_i - fc*_{i-1/2})
-      // smooth non-conservative term H_i d_x U|smooth, f_cr row: (gamma_cr-1) v_max^2 b d_x E_c
-      // with a central difference of E_c on the cell stencil.
-      // divf = (D_L^{i+1/2} - D_R^{i-1/2}) / dx + H_i d_x U|smooth
+      // flx1 holds the star value f_c* at each face. The cell's own state is f_i.
+      //   D_L at right face i+1/2 = +S_{i+1/2} (f_i - f*_{i+1/2})
+      //   D_R at left face  i-1/2 = -S_{i-1/2} (f_i - f*_{i-1/2})
+      // smooth term H_i d_x E_c with H_i = (gamma_cr-1) v_max^2 b_i and a central difference
+      // of E_c on the cell stencil.
+      // divf = (D_L^{i+1/2} - D_R^{i-1/2}) / dx + H_i d_x E_c
       par_for_inner(member, is, ie, [&](const int i) {
-        Real fc_star_ip1 = flx1(m,n,k,j,i+1)/S_cr;
-        Real fc_star_i   = flx1(m,n,k,j,i)/S_cr;
-        Real DL_right = S_cr*(u0_(m,n,k,j,i) - fc_star_ip1);
-        Real DR_left  = -S_cr*(u0_(m,n,k,j,i) - fc_star_i);
+        // shared face B_x on faces i (left of cell i) and i+1 (right of cell i);
+        // each face's wave speed is the max |b_n| of its two sides
+        Real bnf_Lm = BnFace(bcc_, bx1f_, use_mhd, m, k, j, i,   i-1);
+        Real bnf_Lr = BnFace(bcc_, bx1f_, use_mhd, m, k, j, i,   i);
+        Real bnf_Rl = BnFace(bcc_, bx1f_, use_mhd, m, k, j, i+1, i);
+        Real bnf_Rr = BnFace(bcc_, bx1f_, use_mhd, m, k, j, i+1, i+1);
+        Real S_L = vmax*sqrt_gm1*fmax(fabs(bnf_Lm), fabs(bnf_Lr));
+        Real S_R = vmax*sqrt_gm1*fmax(fabs(bnf_Rl), fabs(bnf_Rr));
+        // cell midpoint projection b_i = B_x,i/|B_i| for H_i (paper's H_i = (gamma-1) c^2 b_i)
+        Real bi = BnCell(bcc_, use_mhd, m, k, j, i);
+        Real fc_star_ip1 = flx1(m,n,k,j,i+1);
+        Real fc_star_i   = flx1(m,n,k,j,i);
+        Real DL_right = S_R*(u0_(m,n,k,j,i) - fc_star_ip1);
+        Real DR_left  = -S_L*(u0_(m,n,k,j,i) - fc_star_i);
         Real dx1 = mbsize.d_view(m).dx1;
         Real dEc_dx = (u0_(m,ICRE,k,j,i+1) - u0_(m,ICRE,k,j,i-1))/(2.0*dx1);
-        Real Hsmooth = (gamma_cr - 1.0)*v_max*v_max*bi_x1*dEc_dx;
+        Real Hsmooth = gm1*vmax2*bi*dEc_dx;
         divf(i) = (DL_right - DR_left)/dx1 + Hsmooth;
       });
     } else {
@@ -267,7 +313,11 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
     member.team_barrier();
 
     par_for_inner(member, is, ie, [&](const int i) {
-      u0_(m,n,k,j,i) = gam0*u0_(m,n,k,j,i) + gam1*u1_(m,n,k,j,i) - beta_dt*divf(i);
+      Real unew = u0_(m,n,k,j,i) - beta_dt*divf(i);
+      // floor the positive-definite energies; f_c (ICRF) is signed and is not floored
+      if (n == ICRE) unew = fmax(unew, efloor_);
+      if (n == IAWP || n == IAWM) unew = fmax(unew, wfloor_);
+      u0_(m,n,k,j,i) = unew;
     });
   });
 
@@ -279,7 +329,7 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
 //! Per-cell implicit solve of (I - dt R) u_new = u_old, with R from the anisotropic
 //! source. Block structure: (E_c, f_c) solved as a 2x2, then E_+ and E_- as scalars.
 TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *pdrive, int stage) {
-  Real dt_src = (pdrive->beta[stage-1])*(pmy_pack->pmesh->dt);
+  Real dt_src = pdrive->craw_dt_sub;  // source span of one craw subcycle
 
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
@@ -295,6 +345,8 @@ TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *pdrive, int stage) {
   Real alpha = alpha_landau;
   Real atol_ = atol;
   Real rtol_ = rtol;
+  Real efloor_ = efloor;
+  Real wfloor_ = wfloor;
   Real gs = 1.0 - 1.0/std::sqrt(2.0);  // gamma_s of the two-stage scheme
   const int max_src_iter = 5000000;      // per-cell cap on adaptive substeps
   auto u0_ = u0;
@@ -400,10 +452,11 @@ TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *pdrive, int stage) {
       dtsrc = dtsrc*fac;
     }
 
-    u0_(m,ICRE,k,j,i) = U[0];
+    // floors on the positive-definite energies. f_c is signed and is not floored.
+    u0_(m,ICRE,k,j,i) = fmax(U[0], efloor_);
     u0_(m,ICRF,k,j,i) = U[1];
-    u0_(m,IAWP,k,j,i) = U[2];
-    u0_(m,IAWM,k,j,i) = U[3];
+    u0_(m,IAWP,k,j,i) = fmax(U[2], wfloor_);
+    u0_(m,IAWM,k,j,i) = fmax(U[3], wfloor_);
   });
 
   // host check: stop the run as soon as any cell has exceeded the iteration cap

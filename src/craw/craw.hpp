@@ -79,6 +79,8 @@ class CosmicRayAW {
   Real alpha_landau;        // nonlinear Landau damping coefficient (alpha)
   Real atol;                // absolute tolerance for the source-term error estimate
   Real rtol;                // relative tolerance for the source-term error estimate
+  Real efloor;              // floor on CR energy density ICRE (default 1e-16)
+  Real wfloor;              // floor on wave energy densities IAWP, IAWM (default 1e-16)
   Real m_cr;                // CR particle mass in code units (fixed, default proton mass)
   Real B_code;              // standalone field (code units) used to set chi
   Real chi_cr;              // chi = (9 pi/8) lorentz m c^3 B, B = B_code
@@ -91,7 +93,13 @@ class CosmicRayAW {
   DvceArray5D<Real> coarse_u0;  // conserved variables on 2x coarser grid (for SMR/AMR)
   DvceFaceFld5D<Real> uflx;     // spatial fluxes on zone faces (exchanged)
   DvceFaceFld5D<Real> uflx_aniso;  // anisotropic transport fluxes on zone faces
+                                   // (x1: ICRF holds the Riemann star value f_c*, not S f_c*)
   Real dtnew;
+
+  // wall-clock time spent in the craw subcycle task lists, summed over the run
+  Kokkos::Timer subcycle_timer;
+  double subcycle_seconds;
+  int nsubcycles;
 
   // Boundary communication buffers and functions for u
   MeshBoundaryValuesCC *pbval_u;

@@ -77,6 +77,7 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
   ndiag(1),
   pwall_clock_(ptimer),
   wall_time(wtlim),
+  craw_dt_sub(0.0),
   nmb_updated_(0),
   npart_updated_(0),
   lb_efficiency_(0) {
@@ -564,6 +565,22 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
       // Execute TaskLists
       // Work before time integrator indicated by "0" in stage
       ExecuteTaskList(pmesh, "before_timeintegrator", 0);
+
+      // CR transport + source, first half: N_cr/2 subcycles of size dt/N_cr.
+      // Runs before the fluid RK stages, as in the operator split of the 2010 paper.
+      if (pmesh->pmb_pack->pcraw != nullptr) {
+        craw::CosmicRayAW *pcraw = pmesh->pmb_pack->pcraw;
+        craw_dt_sub = pmesh->dt/static_cast<Real>(pcraw->N_cr);
+        pcraw->subcycle_timer.reset();
+        for (int n=0; n<pcraw->N_cr/2; ++n) {
+          ExecuteTaskList(pmesh, "before_craw_sub", 0);
+          ExecuteTaskList(pmesh, "craw_sub", 0);
+          ExecuteTaskList(pmesh, "after_craw_sub", 0);
+          pcraw->nsubcycles++;
+        }
+        pcraw->subcycle_seconds += pcraw->subcycle_timer.seconds();
+      }
+
       // time-integrator tasks for each stage of integrator
       for (int stage=1; stage<=(nexp_stages); ++stage) {
         ExecuteTaskList(pmesh, "before_stagen", stage);
@@ -573,6 +590,19 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
             {pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);}
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
+      }
+
+      // CR transport + source, second half: N_cr/2 subcycles of size dt/N_cr.
+      if (pmesh->pmb_pack->pcraw != nullptr) {
+        craw::CosmicRayAW *pcraw = pmesh->pmb_pack->pcraw;
+        pcraw->subcycle_timer.reset();
+        for (int n=0; n<pcraw->N_cr/2; ++n) {
+          ExecuteTaskList(pmesh, "before_craw_sub", 0);
+          ExecuteTaskList(pmesh, "craw_sub", 0);
+          ExecuteTaskList(pmesh, "after_craw_sub", 0);
+          pcraw->nsubcycles++;
+        }
+        pcraw->subcycle_seconds += pcraw->subcycle_timer.seconds();
       }
 
       // Work after time integrator indicated by "1" in stage
@@ -704,6 +734,16 @@ void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
       std::cout << "cpu time used  = " << exe_time << std::endl;
       std::cout << "zone-cycles/cpu_second = " << zcps << std::endl;
       std::cout << "particle-updates/cpu_second = " << pups << std::endl;
+
+      // CR module cost: wall time in the craw subcycle task lists, and its fraction
+      if (pmesh->pmb_pack->pcraw != nullptr) {
+        craw::CosmicRayAW *pcraw = pmesh->pmb_pack->pcraw;
+        double frac = (exe_time > 0.0) ? pcraw->subcycle_seconds/exe_time : 0.0;
+        std::cout << "craw subcycle time = " << pcraw->subcycle_seconds
+                  << " s (" << 100.0*frac << "% of cpu time), "
+                  << pcraw->nsubcycles << " subcycles, N_cr = " << pcraw->N_cr
+                  << std::endl;
+      }
     }
   }
   return;

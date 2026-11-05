@@ -49,6 +49,7 @@ class Driver {
   TimeEvolution time_evolution;
   DvceArray6D<Real> impl_src;  // stiff source terms used in ImEx integrators
   STSController sts;
+  Real craw_dt_sub;                // craw transport/source subcycle size, dt/N_cr
 
   // folowing data only relevant for runs involving time evolution
   Real tlim;      // stopping time

@@ -6,6 +6,7 @@
 //! \file craw.cpp
 //! \brief implementation of CosmicRayAW class constructor and destructor
 
+#include <cfloat>   // FLT_MIN
 #include <iostream>
 #include <string>
 
@@ -26,17 +27,31 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
     uflx("craw_uflx",1,1,1,1,1),
     uflx_aniso("craw_uflx_aniso",1,1,1,1,1),
     dtnew(0.0),
+    subcycle_seconds(0.0),
+    nsubcycles(0),
     pmy_pack(ppack) {
   
   Real l0 = 3.0856775809623245e18;
   Real t0 = 3.15576e13;  // s, 1 Myr in seconds
   Real true_c = 2.99792458e10  ;  // pc/Myr
-  v_max = std::min(true_c/(l0/t0), pin->GetOrAddReal("craw","v_max",1.0));
+  v_max = std::min(true_c/(l0/t0), pin->GetOrAddReal("craw","v_max",100.0));
   // lorentz and m_cr set the CR bin and do not change with the fluid
   lorentz = pin->GetOrAddReal("craw","lorentz",2.0);
-  N_cr = pin->GetOrAddInteger("craw","ncr_sub",1);  // CR substeps per fluid stage
+  N_cr = pin->GetOrAddInteger("craw","ncr_sub",2);  // CR substeps per fluid step (even)
+  // Strang split: N_cr/2 subcycles before and N_cr/2 after the fluid update, so N_cr must
+  // be a positive even integer. Checked here so a bad value fails before the run starts.
+  if (N_cr < 1 || N_cr % 2 != 0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<craw>/ncr_sub = " << N_cr << " must be a positive even integer"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   atol = pin->GetOrAddReal("craw","atol",1.0e-8);
   rtol = pin->GetOrAddReal("craw","rtol",1.0e-6);
+  // floors on the CR energy density and the wave energy densities, as dfloor/pfloor in
+  // hydro and MHD. Default 1e-16 (code units). Applied after each update so the energies stay positive.
+  efloor = pin->GetOrAddReal("craw","efloor",1.0e-16);
+  wfloor = pin->GetOrAddReal("craw","wfloor",1.0e-16);
 
   m_cr = pin->GetOrAddReal("craw","m_cr",1.0) * 1.67262192e-24;
 
@@ -44,6 +59,14 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
   // v_A is needed only for standalone CR runs. With a fluid, the Alfven speed comes from
   // the fluid density and field, so v_A is not read.
   has_fluid = (pmy_pack->phydro != nullptr) || (pmy_pack->pmhd != nullptr);
+
+  // With a fluid present, the CR coupling needs the magnetic field, so hydro-only is rejected.
+  // A standalone CR run (no fluid) is still allowed.
+  if (has_fluid && pmy_pack->pmhd == nullptr) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<craw> with a fluid requires <mhd>; hydro-only is not supported" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   if (!has_fluid) {
     // code units: length = pc, time = Myr, density = m_p/cm^3 (so rho_unit = m_p in grams)
@@ -115,7 +138,6 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
   Kokkos::realloc(uflx_aniso.x1f, nmb, nvars, ncells3, ncells2, ncells1+1);
   Kokkos::realloc(uflx_aniso.x2f, nmb, nvars, ncells3, ncells2+1, ncells1);
   Kokkos::realloc(uflx_aniso.x3f, nmb, nvars, ncells3+1, ncells2, ncells1);
-
   if (pmy_pack->pmesh->multilevel) {
     int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
     int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
