@@ -28,10 +28,12 @@
 #include "mhd.hpp"
 #include "eos/eos.hpp"
 #include "reconstruct/recon.hpp"
+#include "craw/craw.hpp"  // pcraw, craw::CosmicRayAW::nvars for the CR reconstruction
 #include "mhd/rsolvers/advect_mhd.hpp"
 #include "mhd/rsolvers/llf_mhd.hpp"
 #include "mhd/rsolvers/hlle_mhd.hpp"
 #include "mhd/rsolvers/hlld_mhd.hpp"
+#include "mhd/rsolvers/hlld_craw.hpp"  // HLLD with CR pressure, used only when craw is on
 #include "mhd/rsolvers/llf_srmhd.hpp"
 #include "mhd/rsolvers/hlle_srmhd.hpp"
 #include "mhd/rsolvers/llf_grmhd.hpp"
@@ -133,22 +135,48 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     // Reconstruct Bcc over cells i in [il1-1, iu1], components n in [0, 2]
     ReconDispatch<IVX>(recon_method_, "mflux_x1_recon_b", nmb1,
         kl, ku, jl, ju, il1-1, iu1, eos_, false, 3,     bcc0_, bl_, br_);
+    // Cosmic rays: reconstruct craw's u0 with the same stencil, when craw is on
+    if (pmy_pack->pcraw != nullptr) {
+      ReconDispatchCR<IVX>(recon_method_, "mflux_x1_recon_cr", nmb1,
+          kl, ku, jl, ju, il1-1, iu1, pmy_pack->pcraw->pcreos->eos_data,
+          craw::CosmicRayAW::nvars, pmy_pack->pcraw->u0,
+          pmy_pack->pcraw->wl_cr, pmy_pack->pcraw->wr_cr);
+    }
 
     // Riemann solve over faces i in [il1, iu1]
-    par_for("mflux_x1_rsolve", DevExeSpace(),
-      0, nmb1, kl, ku, jl, ju, il1, iu1,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        auto eos = eos_;
-        auto indcs = indcs_;
-        auto size = size_;
-        auto coord = coord_;
-        auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
-        auto bx = bx_;  auto flx = flx1;  auto eyl = e31;  auto ezl = e21;
-        const int is_ = is, js_ = js, ks_ = ks;
-        SolveFaceMHD<rsolver_method_, IVX>(eos, indcs, size, coord,
-                                           m, k, j, i, is_, js_, ks_,
-                                           wl, wr, bl, br, bx, flx, eyl, ezl);
-      });
+    if (pmy_pack->pcraw != nullptr) {
+      // craw on: the CR-aware adiabatic HLLD replaces the fluid solve in this same face loop.
+      // Captured only here, so a run without craw never touches the CR views.
+      CREOS_Data creos = pmy_pack->pcraw->pcreos->eos_data;
+      auto wlc = pmy_pack->pcraw->wl_cr;
+      auto wrc = pmy_pack->pcraw->wr_cr;
+      auto ust = pmy_pack->pcraw->uface_cr.x1f;
+      auto crf = pmy_pack->pcraw->crflx_adv.x1f;
+      par_for("mflux_x1_rsolve", DevExeSpace(),
+        0, nmb1, kl, ku, jl, ju, il1, iu1,
+        KOKKOS_LAMBDA(int m, int k, int j, int i) {
+          auto eos = eos_;
+          auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
+          auto bx = bx_;  auto flx = flx1;  auto eyl = e31;  auto ezl = e21;
+          mhd::HLLD_CRAW<IVX>(eos, creos, m, k, j, i, wl, wr, bl, br, bx,
+                              wlc, wrc, flx, eyl, ezl, ust, crf);
+        });
+    } else {
+      par_for("mflux_x1_rsolve", DevExeSpace(),
+        0, nmb1, kl, ku, jl, ju, il1, iu1,
+        KOKKOS_LAMBDA(int m, int k, int j, int i) {
+          auto eos = eos_;
+          auto indcs = indcs_;
+          auto size = size_;
+          auto coord = coord_;
+          auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
+          auto bx = bx_;  auto flx = flx1;  auto eyl = e31;  auto ezl = e21;
+          const int is_ = is, js_ = js, ks_ = ks;
+          SolveFaceMHD<rsolver_method_, IVX>(eos, indcs, size, coord,
+                                             m, k, j, i, is_, js_, ks_,
+                                             wl, wr, bl, br, bx, flx, eyl, ezl);
+        });
+    }
 
     // Scalar fluxes (upwind from sign of mass flux), active transverse range
     if (nvars > nmhd_) {
@@ -183,22 +211,47 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     // Reconstruct Bcc over cells j in [jl2-1, ju2], i in [is-1, ie+1], n in [0, 2]
     ReconDispatch<IVY>(recon_method_, "mflux_x2_recon_b", nmb1,
         kl, ku, jl2-1, ju2, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+    // Cosmic rays: reconstruct craw's u0 with the same stencil, when craw is on
+    if (pmy_pack->pcraw != nullptr) {
+      ReconDispatchCR<IVY>(recon_method_, "mflux_x2_recon_cr", nmb1,
+          kl, ku, jl2-1, ju2, is-1, ie+1, pmy_pack->pcraw->pcreos->eos_data,
+          craw::CosmicRayAW::nvars, pmy_pack->pcraw->u0,
+          pmy_pack->pcraw->wl_cr, pmy_pack->pcraw->wr_cr);
+    }
 
     // Riemann solve over faces j in [jl2, ju2], i in [is-1, ie+1]
-    par_for("mflux_x2_rsolve", DevExeSpace(),
-      0, nmb1, kl, ku, jl2, ju2, is-1, ie+1,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        auto eos = eos_;
-        auto indcs = indcs_;
-        auto size = size_;
-        auto coord = coord_;
-        auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
-        auto bx = by_;  auto flx = flx2;  auto eyl = e12;  auto ezl = e32;
-        const int is_ = is, js_ = js, ks_ = ks;
-        SolveFaceMHD<rsolver_method_, IVY>(eos, indcs, size, coord,
-                                           m, k, j, i, is_, js_, ks_,
-                                           wl, wr, bl, br, bx, flx, eyl, ezl);
-      });
+    if (pmy_pack->pcraw != nullptr) {
+      // craw on: CR-aware adiabatic HLLD in the x2 face loop, same as x1
+      CREOS_Data creos = pmy_pack->pcraw->pcreos->eos_data;
+      auto wlc = pmy_pack->pcraw->wl_cr;
+      auto wrc = pmy_pack->pcraw->wr_cr;
+      auto ust = pmy_pack->pcraw->uface_cr.x2f;
+      auto crf = pmy_pack->pcraw->crflx_adv.x2f;
+      par_for("mflux_x2_rsolve", DevExeSpace(),
+        0, nmb1, kl, ku, jl2, ju2, is-1, ie+1,
+        KOKKOS_LAMBDA(int m, int k, int j, int i) {
+          auto eos = eos_;
+          auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
+          auto bx = by_;  auto flx = flx2;  auto eyl = e12;  auto ezl = e32;
+          mhd::HLLD_CRAW<IVY>(eos, creos, m, k, j, i, wl, wr, bl, br, bx,
+                              wlc, wrc, flx, eyl, ezl, ust, crf);
+        });
+    } else {
+      par_for("mflux_x2_rsolve", DevExeSpace(),
+        0, nmb1, kl, ku, jl2, ju2, is-1, ie+1,
+        KOKKOS_LAMBDA(int m, int k, int j, int i) {
+          auto eos = eos_;
+          auto indcs = indcs_;
+          auto size = size_;
+          auto coord = coord_;
+          auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
+          auto bx = by_;  auto flx = flx2;  auto eyl = e12;  auto ezl = e32;
+          const int is_ = is, js_ = js, ks_ = ks;
+          SolveFaceMHD<rsolver_method_, IVY>(eos, indcs, size, coord,
+                                             m, k, j, i, is_, js_, ks_,
+                                             wl, wr, bl, br, bx, flx, eyl, ezl);
+        });
+    }
 
     if (nvars > nmhd_) {
       par_for("mflux_x2_scalars", DevExeSpace(),
@@ -230,22 +283,47 @@ void MHD::CalculateFluxes(Driver *pdriver, int stage) {
     // Reconstruct Bcc over the same cells, components n in [0, 2]
     ReconDispatch<IVZ>(recon_method_, "mflux_x3_recon_b", nmb1,
         kl3-1, ku3, js-1, je+1, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+    // Cosmic rays: reconstruct craw's u0 with the same stencil, when craw is on
+    if (pmy_pack->pcraw != nullptr) {
+      ReconDispatchCR<IVZ>(recon_method_, "mflux_x3_recon_cr", nmb1,
+          kl3-1, ku3, js-1, je+1, is-1, ie+1, pmy_pack->pcraw->pcreos->eos_data,
+          craw::CosmicRayAW::nvars, pmy_pack->pcraw->u0,
+          pmy_pack->pcraw->wl_cr, pmy_pack->pcraw->wr_cr);
+    }
 
     // Riemann solve over faces k in [kl3, ku3], j in [js-1, je+1], i in [is-1, ie+1]
-    par_for("mflux_x3_rsolve", DevExeSpace(),
-      0, nmb1, kl3, ku3, js-1, je+1, is-1, ie+1,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        auto eos = eos_;
-        auto indcs = indcs_;
-        auto size = size_;
-        auto coord = coord_;
-        auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
-        auto bx = bz_;  auto flx = flx3;  auto eyl = e23;  auto ezl = e13;
-        const int is_ = is, js_ = js, ks_ = ks;
-        SolveFaceMHD<rsolver_method_, IVZ>(eos, indcs, size, coord,
-                                           m, k, j, i, is_, js_, ks_,
-                                           wl, wr, bl, br, bx, flx, eyl, ezl);
-      });
+    if (pmy_pack->pcraw != nullptr) {
+      // craw on: CR-aware adiabatic HLLD in the x3 face loop, same as x1
+      CREOS_Data creos = pmy_pack->pcraw->pcreos->eos_data;
+      auto wlc = pmy_pack->pcraw->wl_cr;
+      auto wrc = pmy_pack->pcraw->wr_cr;
+      auto ust = pmy_pack->pcraw->uface_cr.x3f;
+      auto crf = pmy_pack->pcraw->crflx_adv.x3f;
+      par_for("mflux_x3_rsolve", DevExeSpace(),
+        0, nmb1, kl3, ku3, js-1, je+1, is-1, ie+1,
+        KOKKOS_LAMBDA(int m, int k, int j, int i) {
+          auto eos = eos_;
+          auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
+          auto bx = bz_;  auto flx = flx3;  auto eyl = e23;  auto ezl = e13;
+          mhd::HLLD_CRAW<IVZ>(eos, creos, m, k, j, i, wl, wr, bl, br, bx,
+                              wlc, wrc, flx, eyl, ezl, ust, crf);
+        });
+    } else {
+      par_for("mflux_x3_rsolve", DevExeSpace(),
+        0, nmb1, kl3, ku3, js-1, je+1, is-1, ie+1,
+        KOKKOS_LAMBDA(int m, int k, int j, int i) {
+          auto eos = eos_;
+          auto indcs = indcs_;
+          auto size = size_;
+          auto coord = coord_;
+          auto wl = wl_;  auto wr = wr_;  auto bl = bl_;  auto br = br_;
+          auto bx = bz_;  auto flx = flx3;  auto eyl = e23;  auto ezl = e13;
+          const int is_ = is, js_ = js, ks_ = ks;
+          SolveFaceMHD<rsolver_method_, IVZ>(eos, indcs, size, coord,
+                                             m, k, j, i, is_, js_, ks_,
+                                             wl, wr, bl, br, bx, flx, eyl, ezl);
+        });
+    }
 
     if (nvars > nmhd_) {
       par_for("mflux_x3_scalars", DevExeSpace(),

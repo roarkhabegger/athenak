@@ -15,6 +15,7 @@
 #include "eos/eos.hpp"
 #include "mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "craw/craw.hpp"  // craw::CosmicRayAW::nvars and the CR slot indices, when craw is on
 
 namespace mhd {
 //----------------------------------------------------------------------------------------

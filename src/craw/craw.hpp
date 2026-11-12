@@ -17,6 +17,7 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "bvals/bvals.hpp"
+#include "craw/creos.hpp"   // CREOS, CREOS_Data, and the CRAWVariableIndex enum
 
 // forward declarations
 class Driver;
@@ -26,36 +27,29 @@ class Driver;
 //  \brief container to hold TaskIDs of all craw tasks
 
 struct CRAWTaskIDs {
-  TaskID irecv;
-  TaskID copyu;
+  TaskID irecv_sub;   // before_craw_sub: post receives for u
+  TaskID irecv;       // before_stagen: post receives for u, every stage
+  TaskID copyu;  // CopyCons, stagen: u0 -> u1 at stage 1
+  TaskID sendu, recvu, prol, bcs;  // u0 ghost exchange in stagen, every stage
+  TaskID rkupdt;                   // RKUpdate, stagen: adiabatic CR update, after flux
   TaskID flux;
   TaskID sendf;
   TaskID recvf;
-  TaskID rkupdt;
+  TaskID sub_rkupdt;  // Sub_RKUpdate, craw_sub: anisotropic subcycle update
   TaskID srctrms;
   TaskID restu;
-  TaskID sendu;
-  TaskID recvu;
-  TaskID bcs;
-  TaskID prol;
+  TaskID sendu_sub;
+  TaskID recvu_sub;
+  TaskID bcs_sub;
+  TaskID prol_sub;
   TaskID newdt;
-  TaskID csend;
-  TaskID crecv;
+  TaskID csend_sub;   // after_craw_sub: finish sends of u
+  TaskID crecv_sub;   // after_craw_sub: finish receives of u
+  TaskID csend;       // after_stagen: finish sends of u, every stage
+  TaskID crecv;       // after_stagen: finish receives of u, every stage
 };
 
 namespace craw {
-
-//----------------------------------------------------------------------------------------
-//! \enum CRAWVariableIndex
-//  \brief indices of the craw conserved variables in u0, 1D (flux along x1 only).
-//  Energy densities share units with the fluid total energy density (IEN). The flux is
-//  in units of velocity times energy density.
-enum CRAWVariableIndex {
-  ICRE = 0,   // cosmic-ray energy density
-  ICRF = 1,   // cosmic-ray flux along x1 (flux along local B, 1D default)
-  IAWP = 2,   // forward-propagating Alfven wave energy density (plus)
-  IAWM = 3    // backward-propagating Alfven wave energy density (minus)
-};
 
 //----------------------------------------------------------------------------------------
 //! \class CosmicRayAW
@@ -79,11 +73,15 @@ class CosmicRayAW {
   Real alpha_landau;        // nonlinear Landau damping coefficient (alpha)
   Real atol;                // absolute tolerance for the source-term error estimate
   Real rtol;                // relative tolerance for the source-term error estimate
-  Real efloor;              // floor on CR energy density ICRE (default 1e-16)
-  Real wfloor;              // floor on wave energy densities IAWP, IAWM (default 1e-16)
-  Real m_cr;                // CR particle mass in code units (fixed, default proton mass)
+  CREOS *pcreos;            // CR equation of state: pressures and floors (owns the floors)
+  Real m_cr;               // CR particle mass in code units (fixed, default proton mass)
   Real B_code;              // standalone field (code units) used to set chi
-  Real chi_cr;              // chi = (9 pi/8) lorentz m c^3 B, B = B_code
+  Real chi_cr;              // chi = (9 pi/8) lorentz m c^3 B, B = B_code (standalone only)
+  // B-independent coefficients and code-unit scales, shared by the standalone and MHD paths:
+  //   chi = chi_K / B_gauss,   alpha = (alpha_K / B_gauss) sqrt(P/rho) v_unit E_unit T_unit
+  Real chi_K;               // gyroresonant coefficient, cgs, chi = chi_K / B_gauss
+  Real alpha_K;             // Landau coefficient, cgs, see above
+  Real E_unit, v_unit, T_unit;  // code scales: energy density (erg/cm^3), velocity (cm/s), time (s)
   bool has_fluid;           // true if hydro or MHD is present in the pack
 
   // conserved variables and their storage
@@ -94,6 +92,14 @@ class CosmicRayAW {
   DvceFaceFld5D<Real> uflx;     // spatial fluxes on zone faces (exchanged)
   DvceFaceFld5D<Real> uflx_aniso;  // anisotropic transport fluxes on zone faces
                                    // (x1: ICRF holds the Riemann star value f_c*, not S f_c*)
+
+  // adiabatic CR step (2010 Sec. 2.1), used with MHD. Reconstructed L/R states of u0 for
+  // each face direction, filled by ReconDispatch with the MHD reconstruction method.
+  DvceArray5D<Real> wl_cr, wr_cr;       // (nmb, nvars, n3, n2, n1), reconstructed u0 (x1)
+  // Face outputs of the CR-aware HLLD, for all three face directions as for uflx_aniso:
+  // contact velocity u* on each face, and the advective CR fluxes on each face
+  DvceFaceFld4D<Real> uface_cr;         // contact velocity u* on faces
+  DvceFaceFld5D<Real> crflx_adv;        // advective CR fluxes on faces, nvars components
   Real dtnew;
 
   // wall-clock time spent in the craw subcycle task lists, summed over the run
@@ -117,7 +123,8 @@ class CosmicRayAW {
   TaskStatus CalculateAnisoFluxes(Driver *pdrive, int stage);
   TaskStatus SendFlux(Driver *pdrive, int stage);
   TaskStatus RecvFlux(Driver *pdrive, int stage);
-  TaskStatus RKUpdate(Driver *pdrive, int stage);
+  TaskStatus Sub_RKUpdate(Driver *pdrive, int stage);  // anisotropic subcycle update
+  TaskStatus RKUpdate(Driver *pdrive, int stage);      // adiabatic CR update, stagen
   TaskStatus CRAWSrcTerms(Driver *pdrive, int stage);
   TaskStatus RestrictU(Driver *pdrive, int stage);
   TaskStatus SendU(Driver *pdrive, int stage);

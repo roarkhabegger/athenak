@@ -1,0 +1,84 @@
+<comment>
+problem   = craw CR top-hat heating (test 3)
+
+<job>
+basename  = craw_test3_heating_tophat
+
+<mesh>
+nghost    = 3
+nx1       = 128
+x1min     = 0.0
+x1max     = 1.0
+ix1_bc    = periodic
+ox1_bc    = periodic
+
+nx2       = 1
+x2min     = 0.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = 0.0
+x3max     = 1.0
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 128
+nx2       = 1
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 0.1
+ndiag      = 1
+
+<mhd>
+eos       = ideal
+gamma     = 1.6666666667
+reconstruct = plm
+rsolver   = hlld
+dfloor    = 1.0e-8
+pfloor    = 1.0e-8
+
+<craw>
+v_max     = 200.0
+lorentz   = 2.0
+ncr_sub   = 20
+atol      = 1.0e-8
+rtol      = 1.0e-6
+efloor    = 1.0e-12
+wfloor    = 1.0e-12
+T_gas     = 1.0e4
+
+<problem>
+pgen_name = craw_gaussian
+rho       = 1.0
+vx        = 0.0
+Bx        = 1.0
+pgas      = 1.0
+bkg       = 1.0e-6
+bkgw      = 1.0e-6
+impulse   = 2
+amp       = 1.0
+x0        = 0.5
+sigma     = 0.1
+
+<output1>
+file_type = hst
+dcycle    = 1
+data_format = %12.5e
+
+<output2>
+file_type = tab
+variable  = mhd_w
+dt        = 0.01
+
+<output3>
+file_type = tab
+variable  = craw_u
+dt        = 0.01

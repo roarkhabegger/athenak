@@ -159,6 +159,7 @@ add_executable(
         pgen/unit_tests/eos_compose.cpp
         pgen/unit_tests/gauss_legendre.cpp
 
+        craw/creos.cpp
         craw/craw.cpp
         craw/craw_tasks.cpp
 

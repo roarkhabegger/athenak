@@ -23,6 +23,7 @@
 #include "craw/craw.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "eos/eos.hpp"
 #include "ion-neutral/ion-neutral.hpp"
 
 namespace craw {
@@ -59,28 +60,61 @@ void CosmicRayAW::AssembleCRAWTasks(
   TaskID none(0);
 
   // "before_craw_sub" task list: post MPI receives for u before each subcycle
-  id.irecv = tl["before_craw_sub"]->AddTask(&CosmicRayAW::InitRecv, this, none);
+  id.irecv_sub = tl["before_craw_sub"]->AddTask(&CosmicRayAW::InitRecv, this, none);
 
   // "craw_sub" task list: one transport + source subcycle of size craw_dt_sub, run by the
   // driver N_cr/2 times before and N_cr/2 times after the fluid RK stages. No RK weights.
   id.flux    = tl["craw_sub"]->AddTask(&CosmicRayAW::CalculateAnisoFluxes, this, none);
   id.sendf   = tl["craw_sub"]->AddTask(&CosmicRayAW::SendFlux, this, id.flux);
   id.recvf   = tl["craw_sub"]->AddTask(&CosmicRayAW::RecvFlux, this, id.sendf);
-  id.rkupdt  = tl["craw_sub"]->AddTask(&CosmicRayAW::RKUpdate, this, id.recvf);
-  id.srctrms = tl["craw_sub"]->AddTask(&CosmicRayAW::CRAWSrcTerms, this, id.rkupdt);
-  id.restu   = tl["craw_sub"]->AddTask(&CosmicRayAW::RestrictU, this, id.srctrms);
-  id.sendu   = tl["craw_sub"]->AddTask(&CosmicRayAW::SendU, this, id.restu);
-  id.recvu   = tl["craw_sub"]->AddTask(&CosmicRayAW::RecvU, this, id.sendu);
-  id.prol    = tl["craw_sub"]->AddTask(&CosmicRayAW::Prolongate, this, id.recvu);
-  id.bcs     = tl["craw_sub"]->AddTask(&CosmicRayAW::ApplyPhysicalBCs, this, id.prol);
+  id.sub_rkupdt = tl["craw_sub"]->AddTask(&CosmicRayAW::Sub_RKUpdate, this, id.recvf);
+  id.srctrms = tl["craw_sub"]->AddTask(&CosmicRayAW::CRAWSrcTerms, this, id.sub_rkupdt);
+  id.restu     = tl["craw_sub"]->AddTask(&CosmicRayAW::RestrictU, this, id.srctrms);
+  id.sendu_sub = tl["craw_sub"]->AddTask(&CosmicRayAW::SendU, this, id.restu);
+  id.recvu_sub = tl["craw_sub"]->AddTask(&CosmicRayAW::RecvU, this, id.sendu_sub);
+  id.prol_sub  = tl["craw_sub"]->AddTask(&CosmicRayAW::Prolongate, this, id.recvu_sub);
+  id.bcs_sub   = tl["craw_sub"]->AddTask(&CosmicRayAW::ApplyPhysicalBCs, this, id.prol_sub);
 
-  // "stagen" task list: NewTimeStep runs only on the last RK stage (gated inside), so it
-  // sets dtnew once per cycle, not once per craw subcycle.
+  // "stagen" task list: the CR copy u0 -> u1 at stage 1, as MHD's CopyCons, then the
+  // NewTimeStep that runs only on the last RK stage (gated inside), so it sets dtnew once
+  // per cycle, not once per craw subcycle.
+  // stagen: CR copy u0 -> u1 at stage 1. With MHD present it goes before MHD's flux task
+  // and after MHD's own copy, so u1 is set before the MHD RK update that reads it. Inserting
+  // ahead of flux moves flux's dependency onto this task, so it must also follow copyu.
+  if (pmy_pack->pmhd != nullptr) {
+    id.copyu = tl["stagen"]->InsertTask(&CosmicRayAW::CopyCons, this,
+                                        pmy_pack->pmhd->id.copyu, pmy_pack->pmhd->id.flux);
+  } else {
+    id.copyu = tl["stagen"]->AddTask(&CosmicRayAW::CopyCons, this, none);
+  }
+  // CR adiabatic update in stagen, inserted between MHD's rkupdt and srctrms. It must follow
+  // MHD's RK update, because it adds the gas-energy pdV increment to MHD's u0 without a stage
+  // weight, and must precede the BCs and ConToPrim that read u0. Without MHD there is no face
+  // solve, so there is no adiabatic CR update.
+  TaskID cr_done = id.copyu;
+  if (pmy_pack->pmhd != nullptr) {
+    id.rkupdt = tl["stagen"]->InsertTask(&CosmicRayAW::RKUpdate, this,
+                                         pmy_pack->pmhd->id.rkupdt, pmy_pack->pmhd->id.srctrms);
+    cr_done = id.rkupdt;
+  }
+  // CR ghost exchange in stagen, every stage, after the CR update. Same order as MHD:
+  // sendu -> recvu -> prol -> bcs.
+  id.sendu = tl["stagen"]->AddTask(&CosmicRayAW::SendU, this, cr_done);
+  id.recvu = tl["stagen"]->AddTask(&CosmicRayAW::RecvU, this, id.sendu);
+  id.prol  = tl["stagen"]->AddTask(&CosmicRayAW::Prolongate, this, id.recvu);
+  id.bcs   = tl["stagen"]->AddTask(&CosmicRayAW::ApplyPhysicalBCs, this, id.prol);
   id.newdt = tl["stagen"]->AddTask(&CosmicRayAW::NewTimeStep, this, none);
 
   // "after_craw_sub" task list: finish MPI sends and receives after each subcycle
-  id.csend = tl["after_craw_sub"]->AddTask(&CosmicRayAW::ClearSend, this, none);
-  id.crecv = tl["after_craw_sub"]->AddTask(&CosmicRayAW::ClearRecv, this, id.csend);
+  id.csend_sub = tl["after_craw_sub"]->AddTask(&CosmicRayAW::ClearSend, this, none);
+  id.crecv_sub = tl["after_craw_sub"]->AddTask(&CosmicRayAW::ClearRecv, this, id.csend_sub);
+
+  // "before_stagen": post receives for u before each stage, as MHD does
+  id.irecv = tl["before_stagen"]->AddTask(&CosmicRayAW::InitRecv, this, none);
+
+  // "after_stagen": finish sends and receives of u after each stage, as MHD does
+  id.csend = tl["after_stagen"]->AddTask(&CosmicRayAW::ClearSend, this, none);
+  id.crecv = tl["after_stagen"]->AddTask(&CosmicRayAW::ClearRecv, this, id.csend);
 
   return;
 }
@@ -148,7 +182,7 @@ Real BnFace(const DvceArray5D<Real> &bcc, const DvceArray4D<Real> &bx1f, const b
 //! by assignment. The projections b_nL, b_nR and the Alfven speeds are cell-centred values
 //! from the MHD state; standalone CR runs use b_n = 1 and the input v_A.
 //!   E_c flux through a face  = (b_n f_c) - S/2 [E_c],   S = v_max sqrt(gamma_cr-1) max|b_n|
-//!   f_c slot stores the Riemann star value f_c*, not a flux. RKUpdate builds D^f from it.
+//!   f_c slot stores the Riemann star value f_c*, not a flux. Sub_RKUpdate builds D^f from it.
 //!   E_+- flux through a face = +-(b_n v_A E_+-) - S_a/2 [E_+-],  S_a = max |(b_n v_A)_{L,R}|
 TaskStatus CosmicRayAW::CalculateAnisoFluxes(Driver *, int) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -240,12 +274,12 @@ TaskStatus CosmicRayAW::RecvFlux(Driver *pdrive, int stage) {
   return tstat;
 }
 
-//! \fn TaskStatus CosmicRayAW::RKUpdate
+//! \fn TaskStatus CosmicRayAW::Sub_RKUpdate
 //! \brief Forward subcycle update with the flux divergence and the non-conservative f_c term.
 //! Wave speed per face and the smooth coefficient come from the cell-centred field:
 //!   S_{i+1/2} = v_max sqrt(gamma_cr-1) max(|b_i|, |b_{i+1}|),   H_i = (gamma_cr-1) v_max^2 b_i
 //! TODO(roark): x2/x3 flux divergence for multi-D.
-TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
+TaskStatus CosmicRayAW::Sub_RKUpdate(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
   int ks = indcs.ks, ke = indcs.ke;
@@ -258,8 +292,7 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
   auto u0_ = u0;
   auto flx1 = uflx_aniso.x1f;
   auto &mbsize = pmy_pack->pmb->mb_size;
-  Real efloor_ = efloor;
-  Real wfloor_ = wfloor;
+  CREOS_Data creos_ = pcreos->eos_data;
   Real gm1 = gamma_cr - 1.0;
   Real vmax = v_max;
   Real vmax2 = vmax*vmax;
@@ -267,8 +300,10 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
   bool use_mhd = (pmy_pack->pmhd != nullptr);
   DvceArray5D<Real> bcc_ = use_mhd ? pmy_pack->pmhd->bcc0 : u0;
   DvceArray4D<Real> bx1f_ = use_mhd ? pmy_pack->pmhd->b0.x1f : DvceArray4D<Real>();
+  DvceArray5D<Real> mu0_ = use_mhd ? pmy_pack->pmhd->u0 : u0;  // gas momentum, MHD u0
 
   // 1D (x1) update, same weights as hydro's RKUpdate. Loops over all nvars components.
+  // This is the anisotropic subcycle update, not the adiabatic RKUpdate in stagen.
   int scr_level = 0;
   size_t scr_size = ScrArray1D<Real>::shmem_size(ncells1);
 
@@ -303,6 +338,20 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
         Real dEc_dx = (u0_(m,ICRE,k,j,i+1) - u0_(m,ICRE,k,j,i-1))/(2.0*dx1);
         Real Hsmooth = gm1*vmax2*bi*dEc_dx;
         divf(i) = (DL_right - DR_left)/dx1 + Hsmooth;
+        // Gas x-momentum from the same f_cr update. Paper Eq. 330: D^{rho u} = -(b/c^2) D^f,
+        // so Delta(rho u) = -(b/c^2) Delta f with Delta f = -beta_dt*divf. Only the ICRF team
+        // writes IM1 and IEN for this cell, so there is no race.
+        // The kick changes kinetic energy, not thermal energy (paper Eqs. 344-346, 416-418):
+        // IEN += (m_new^2 - m_old^2)/(2 rho). rho is the fluid density, unchanged by craw.
+        // Over the subcycles these increments telescope to (m_N^2 - m_0^2)/(2 rho), the paper's
+        // total kinetic change for the source step.
+        if (use_mhd) {
+          Real rho  = mu0_(m,IDN,k,j,i);
+          Real m0   = mu0_(m,IM1,k,j,i);
+          Real m1   = m0 + beta_dt*bi*divf(i)/vmax2;
+          mu0_(m,IM1,k,j,i) = m1;
+          mu0_(m,IEN,k,j,i) += (m1*m1 - m0*m0)/(2.0*rho);
+        }
       });
     } else {
       // conservative flux difference for ICRE, IAWP, IAWM
@@ -315,9 +364,7 @@ TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
     par_for_inner(member, is, ie, [&](const int i) {
       Real unew = u0_(m,n,k,j,i) - beta_dt*divf(i);
       // floor the positive-definite energies; f_c (ICRF) is signed and is not floored
-      if (n == ICRE) unew = fmax(unew, efloor_);
-      if (n == IAWP || n == IAWM) unew = fmax(unew, wfloor_);
-      u0_(m,n,k,j,i) = unew;
+      u0_(m,n,k,j,i) = creos_.FloorSlot(n, unew);
     });
   });
 
@@ -337,16 +384,22 @@ TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *pdrive, int stage) {
   int ks = indcs.ks, ke = indcs.ke;
   int nmb1 = pmy_pack->nmb_thispack - 1;
 
-  // parameters captured by value for the kernel
-  Real v = v_A;
+  // standalone coefficients (constant) and the MHD state the per-cell ones come from
+  Real v_const = v_A;
+  Real x_const = chi_cr;
+  Real alpha_const = alpha_landau;
   Real c = v_max;
   Real y = gamma_cr;
-  Real x = chi_cr;
-  Real alpha = alpha_landau;
+  bool use_mhd = (pmy_pack->pmhd != nullptr);
+  DvceArray5D<Real> w0_ = use_mhd ? pmy_pack->pmhd->w0 : u0;
+  DvceArray5D<Real> mu0_ = use_mhd ? pmy_pack->pmhd->u0 : u0;  // gas energy, MHD u0
+  DvceArray5D<Real> bcc_ = use_mhd ? pmy_pack->pmhd->bcc0 : u0;
+  Real gam_fl = use_mhd ? pmy_pack->pmhd->peos->eos_data.gamma : 1.0;
+  Real chiK = chi_K, alphaK = alpha_K, Eu = E_unit, vu = v_unit, Tu = T_unit;
+  Real Bfac = std::sqrt(4.0*M_PI*E_unit);  // B_gauss = B_HL * Bfac, B_HL the field in code units
   Real atol_ = atol;
   Real rtol_ = rtol;
-  Real efloor_ = efloor;
-  Real wfloor_ = wfloor;
+  CREOS_Data creos_ = pcreos->eos_data;
   Real gs = 1.0 - 1.0/std::sqrt(2.0);  // gamma_s of the two-stage scheme
   const int max_src_iter = 5000000;      // per-cell cap on adaptive substeps
   auto u0_ = u0;
@@ -359,6 +412,26 @@ TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *pdrive, int stage) {
 
   par_for("craw_src", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    // per-cell coefficients. Standalone: the constants. MHD: from the local state at the start
+    // of this source step, so the temperature used for alpha is the start-of-step value.
+    Real v = v_const, x = x_const, alpha = alpha_const;
+    if (use_mhd) {
+      Real rho = w0_(m,IDN,k,j,i);
+      Real p = (gam_fl - 1.0)*w0_(m,IEN,k,j,i);  // IEN of the primitive state is eint
+      Real bx = bcc_(m,IBX,k,j,i), by = bcc_(m,IBY,k,j,i), bz = bcc_(m,IBZ,k,j,i);
+      Real bhl = sqrt(bx*bx + by*by + bz*bz);
+      Real bg = bhl*Bfac;                              // field in gauss
+      v = bhl/sqrt(rho);                               // v_A = B/sqrt(rho), code units
+      if (bg > 0.0) {
+        x = chiK/bg;                                   // chi = chi_K / B
+        // sqrt(kT/m_p) = sqrt(P/rho) in cgs = sqrt(P/rho)_code * v_unit
+        alpha = (alphaK/bg)*sqrt(p/rho)*vu*Eu*Tu;
+      } else {
+        x = 0.0;                                       // no field: no gyroresonance, no alpha
+        alpha = 0.0;
+      }
+    }
+
     // Un: stage-start state for this cell
     Real Un[4] = {u0_(m,ICRE,k,j,i), u0_(m,ICRF,k,j,i),
                   u0_(m,IAWP,k,j,i), u0_(m,IAWM,k,j,i)};
@@ -453,10 +526,24 @@ TaskStatus CosmicRayAW::CRAWSrcTerms(Driver *pdrive, int stage) {
     }
 
     // floors on the positive-definite energies. f_c is signed and is not floored.
-    u0_(m,ICRE,k,j,i) = fmax(U[0], efloor_);
+    Real Ec_new  = creos_.FloorSlot(ICRE, U[0]);
+    Real Ea_p_new = creos_.FloorSlot(IAWP, U[2]);
+    Real Ea_m_new = creos_.FloorSlot(IAWM, U[3]);
+    u0_(m,ICRE,k,j,i) = Ec_new;
     u0_(m,ICRF,k,j,i) = U[1];
-    u0_(m,IAWP,k,j,i) = fmax(U[2], wfloor_);
-    u0_(m,IAWM,k,j,i) = fmax(U[3], wfloor_);
+    u0_(m,IAWP,k,j,i) = Ea_p_new;
+    u0_(m,IAWM,k,j,i) = Ea_m_new;
+
+    // Thermal energy transfer over the source step (paper Sec. 3.3, Eq. 416):
+    //   Delta(eps_th) = -Delta(eps_cr + eps_a+ + eps_a-)
+    // Uses the floored final values, so the gas gains exactly what the wave and CR energy
+    // lost, including any floor injection. Written once per cell by this thread. The kinetic
+    // energy change is separate (Sub_RKUpdate), so the total gas IEN change here is thermal.
+    // Landau heating is part of the wave-energy loss and is included automatically.
+    if (use_mhd) {
+      Real dE = (Ec_new - Un[0]) + (Ea_p_new - Un[2]) + (Ea_m_new - Un[3]);
+      mu0_(m,IEN,k,j,i) -= dE;
+    }
   });
 
   // host check: stop the run as soon as any cell has exceeded the iteration cap
@@ -585,6 +672,75 @@ TaskStatus CosmicRayAW::Prolongate(Driver *pdrive, int stage) {
   return TaskStatus::complete;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CosmicRayAW::RKUpdate
+//! \brief Adiabatic CR update for one RK stage, in stagen after MHD's flux task, so that
+//! uface_cr (contact velocity u*) and crflx_adv (upwinded CR fluxes) are current.
+//! Same stage weights as MHD's update, with u1 holding the stage-start state:
+//!   u0 = gam0*u0 + gam1*u1 + beta_dt*(-divF + S)
+//!   divF = (crflx_adv(i+1) - crflx_adv(i))/dx,   divu = (u*(i+1) - u*(i))/dx
+//!   S: ICRE -> -P_cr divu;  ICRF -> -f_cr b_x^2 divu;  IAWP, IAWM -> -P_a divu
+//! The gas-energy pdV term (P_cr + P_a) divu is not here: it belongs to the fluid energy.
+TaskStatus CosmicRayAW::RKUpdate(Driver *pdriver, int stage) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  int nmb1 = pmy_pack->nmb_thispack - 1;
+
+  Real gam0 = pdriver->gam0[stage-1];
+  Real gam1 = pdriver->gam1[stage-1];
+  Real beta_dt = pdriver->beta[stage-1]*pmy_pack->pmesh->dt;
+
+  bool use_mhd = (pmy_pack->pmhd != nullptr);
+  DvceArray5D<Real> bcc_ = use_mhd ? pmy_pack->pmhd->bcc0 : u0;
+  auto u0_ = u0;
+  auto u1_ = u1;
+  auto mu0_ = use_mhd ? pmy_pack->pmhd->u0 : u0;  // MHD u0, for the gas-energy pdV increment
+  auto crf_ = crflx_adv.x1f;
+  auto ust_ = uface_cr.x1f;
+  auto &mbsize = pmy_pack->pmb->mb_size;
+  CREOS_Data creos_ = pcreos->eos_data;
+
+  // One thread per cell. It updates every CR slot and writes the gas IEN once, so no atomic.
+  // Each slot's pressure-work part is -beta_dt*src, and the gas gets that after the floor:
+  //   gas IEN += sum over energy slots (flux_part - floored new value) = -beta_dt*sum(src)
+  // f_cr (ICRF) is a flux, not an energy, so it has no gas term.
+  // All reads of u0/u1/crflx/uface are from values this thread does not overwrite, except its
+  // own u0 slots, which it reads before writing.
+  par_for("craw_rkupdt", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real dx1 = mbsize.d_view(m).dx1;
+    Real divu = (ust_(m,k,j,i+1) - ust_(m,k,j,i))/dx1;
+    // Pressures come from the stage-start state u1, which this kernel never writes.
+    Real Pcr = creos_.CRPressure(u1_(m,ICRE,k,j,i));
+    Real bn = BnCell(bcc_, use_mhd, m, k, j, i);  // b_x, 1 without MHD
+    Real gas_gain = 0.0;
+    for (int n = 0; n < nvars; ++n) {
+      Real divF = (crf_(m,n,k,j,i+1) - crf_(m,n,k,j,i))/dx1;
+      Real u_old = u0_(m,n,k,j,i);
+      Real flux_part = gam0*u_old + gam1*u1_(m,n,k,j,i) - beta_dt*divF;
+      Real src = 0.0;
+      if (n == ICRE) {
+        src = -Pcr*divu;
+      } else if (n == ICRF) {
+        src = -u_old*bn*bn*divu;
+      } else {
+        src = -creos_.WavePressure(u1_(m,n,k,j,i))*divu;
+      }
+      Real ufloor = creos_.FloorSlot(n, flux_part + beta_dt*src);
+      u0_(m,n,k,j,i) = ufloor;
+      if (use_mhd && n != ICRF) {
+        gas_gain += flux_part - ufloor;
+      }
+    }
+    if (use_mhd) {
+      mu0_(m,IEN,k,j,i) += gas_gain;
+    }
+  });
+  return TaskStatus::complete;
+}
+
 //! \fn TaskStatus CosmicRayAW::NewTimeStep
 //! TODO(roark): include b_n in S once the field is read from the mesh.
 //! \brief Sets dtnew from the anisotropic CFL limit dx1/v_max. Computed on the last stage
@@ -604,24 +760,63 @@ TaskStatus CosmicRayAW::NewTimeStep(Driver *pdrive, int stage) {
   int &nx2 = indcs.nx2;
   int &nx3 = indcs.nx3;
 
-  // smallest dx/S in each direction, as in hydro: each direction is reduced separately
+  // Fluid limit with the cosmic-ray pressure in the fast speed. Uses the effective pressure
+  // p_eff = P_th + (gamma_cr P_cr + gamma_a P_a)/gamma_th, so gamma_th p_eff is the summed
+  // pressure-weighted sound speed. Only the Newtonian ideal-gas MHD case is covered here,
+  // which is the case the paper's test problems use. The fluid signal speed is |v| + c_f.
+  bool use_mhd = (pmy_pack->pmhd != nullptr);
+  DvceArray5D<Real> w0_ = use_mhd ? pmy_pack->pmhd->w0 : u0;
+  DvceArray5D<Real> bcc_ = use_mhd ? pmy_pack->pmhd->bcc0 : u0;
+  EOS_Data eos = use_mhd ? pmy_pack->pmhd->peos->eos_data : EOS_Data();
+  CREOS_Data creos_ = pcreos->eos_data;
+  Real gcr = gamma_cr;
+  Real gaw = creos_.gamma_a;
+  auto u0_ = u0;  // CR state for the CR pressure in the fast speed
+  int isI = indcs.is, jsI = indcs.js, ksI = indcs.ks;
+  int nx1 = indcs.nx1;
+
+  // Full-step limit, paper Eqs. 354-357: dt = min(N_cr*dt_cr,req, dt_mhd), written as one
+  // speed per direction: dt = dx / max(S/N_cr, |v_d| + c_f,d).
+  //   S/N_cr: the CR limit N_cr*dx/S restated as a speed, so it competes directly with the
+  //           fluid speeds.
+  //   c_f,d:  fluid fast speed with the CR and wave pressure in the effective sound speed.
+  // The driver then runs N_cr subcycles of size dt/N_cr. Mesh applies the CFL factor.
+  // Without MHD only S/N_cr remains.
+  Real Sn = S/static_cast<Real>(N_cr);
   Real dt1 = std::numeric_limits<float>::max();
   Real dt2 = std::numeric_limits<float>::max();
   Real dt3 = std::numeric_limits<float>::max();
   Kokkos::parallel_reduce("CRAWNewDt", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &min_dt1, Real &min_dt2, Real &min_dt3) {
-    int m = (idx)/nkji;  // cell spacing depends only on the MeshBlock
-    min_dt1 = fmin((mbsize.d_view(m).dx1/S), min_dt1);
-    min_dt2 = fmin((mbsize.d_view(m).dx2/S), min_dt2);
-    min_dt3 = fmin((mbsize.d_view(m).dx3/S), min_dt3);
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/(nx2*nx1) + ksI;
+    int j = ((idx - m*nkji)/nx1) % nx2 + jsI;
+    int i = (idx - m*nkji) % nx1 + isI;
+    Real s1 = Sn, s2 = Sn, s3 = Sn;
+    if (use_mhd && eos.is_ideal) {
+      Real d = w0_(m,IDN,k,j,i);
+      Real p = eos.IdealGasPressure(w0_(m,IEN,k,j,i));
+      Real Pcr = (gcr - 1.0)*u0_(m,ICRE,k,j,i);
+      Real Pa  = (gaw - 1.0)*(u0_(m,IAWP,k,j,i) + u0_(m,IAWM,k,j,i));
+      // p_eff = P_th + (gamma_cr P_cr + gamma_a P_a)/gamma_th, so gamma_th p_eff = sum_k gamma_k P_k
+      p += (gcr*Pcr + gaw*Pa)/eos.gamma;
+      Real bx = bcc_(m,IBX,k,j,i), by = bcc_(m,IBY,k,j,i), bz = bcc_(m,IBZ,k,j,i);
+      Real cf1 = eos.IdealMHDFastSpeed(d, p, bx, by, bz);
+      Real cf2 = eos.IdealMHDFastSpeed(d, p, by, bz, bx);
+      Real cf3 = eos.IdealMHDFastSpeed(d, p, bz, bx, by);
+      s1 = fmax(Sn, fabs(w0_(m,IVX,k,j,i)) + cf1);
+      s2 = fmax(Sn, fabs(w0_(m,IVY,k,j,i)) + cf2);
+      s3 = fmax(Sn, fabs(w0_(m,IVZ,k,j,i)) + cf3);
+    }
+    min_dt1 = fmin((mbsize.d_view(m).dx1/s1), min_dt1);
+    min_dt2 = fmin((mbsize.d_view(m).dx2/s2), min_dt2);
+    min_dt3 = fmin((mbsize.d_view(m).dx3/s3), min_dt3);
   }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2), Kokkos::Min<Real>(dt3));
 
   // combine only the directions that are active, as hydro does
   dtnew = dt1;
   if (pmy_pack->pmesh->multi_d) { dtnew = std::min(dtnew, dt2); }
   if (pmy_pack->pmesh->three_d) { dtnew = std::min(dtnew, dt3); }
-  // the CR limit on the full step: N_cr substeps of size dt_cr each satisfy dt_cr <= dt_cr_req
-  dtnew = static_cast<Real>(N_cr)*dtnew;
   return TaskStatus::complete;
 }
 

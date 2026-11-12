@@ -14,6 +14,7 @@
 
 #include "athena.hpp"
 #include "eos/eos.hpp"
+#include "craw/creos.hpp"  // CREOS_Data: CR floors, passed to the same kernels as EOS_Data
 #include "plm.hpp"    // PLM()
 #include "ppm.hpp"    // PPM4(), PPMX()
 #include "wenoz.hpp"  // WENOZ()
@@ -118,6 +119,34 @@ void ReconCellT(const EOS_Data &eos, const bool apply_floors,
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn ReconCellT<recon,ivx>(CREOS_Data)
+//! \brief Overload for cosmic-ray data. Runs the fluid ReconCellT stencil on craw's u0 with
+//! fluid floors off (the EOS argument is then unused), and applies the CR floors from
+//! CREOS to the written L/R values. Selected by overload resolution from the CREOS_Data
+//! argument, so the fluid template and its floor code are unchanged.
+template <ReconstructionMethod recon, int ivx>
+KOKKOS_INLINE_FUNCTION
+void ReconCellT(const CREOS_Data &creos, const bool /*apply_floors*/,
+                const int m, const int n, const int k, const int j, const int i,
+                const DvceArray5D<Real> &q,
+                const DvceArray5D<Real> &wl,
+                const DvceArray5D<Real> &wr) {
+  constexpr int di = (ivx == IVX) ? 1 : 0;
+  constexpr int dj = (ivx == IVY) ? 1 : 0;
+  constexpr int dk = (ivx == IVZ) ? 1 : 0;
+
+  // stencil only: fluid floors off, so the EOS contents are never used
+  EOS_Data no_fluid_eos{};
+  ReconCellT<recon, ivx>(no_fluid_eos, false, m, n, k, j, i, q, wl, wr);
+
+  // CR floors on the values this thread just wrote (same thread owns these indices)
+  Real &ql = wl(m, n, k + dk, j + dj, i + di);
+  Real &qr = wr(m, n, k, j, i);
+  ql = creos.FloorSlot(n, ql);
+  qr = creos.FloorSlot(n, qr);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn ReconDispatch<ivx>()
 //! \brief Select the (runtime, grid-uniform) reconstruction method on the host and launch
 //! the per-cell, per-variable reconstruction kernel with the chosen method fixed at
@@ -179,6 +208,65 @@ inline void ReconDispatch(ReconstructionMethod recon, const char *name, int nmb1
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::dc, ivx>(
               eos, apply_floors, m, n, k, j, i, q, ql, qr);
+        });
+      break;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn ReconDispatchCR<ivx>()
+//! \brief Cosmic-ray counterpart of ReconDispatch, same method switch and launch shape.
+//! Takes CREOS_Data, so each thread calls the CR overload of ReconCellT, which applies the
+//! CR floors unconditionally. ReconDispatch is unchanged. Called from MHD::CalculateFluxes
+//! only when craw is on.
+template <int ivx>
+inline void ReconDispatchCR(ReconstructionMethod recon, const char *name, int nmb1,
+    int kl, int ku, int jl, int ju, int il, int iu,
+    const CREOS_Data &creos, int nvars,
+    const DvceArray5D<Real> &q,
+    const DvceArray5D<Real> &ql, const DvceArray5D<Real> &qr) {
+  switch (recon) {
+    case ReconstructionMethod::plm:
+      par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
+          ReconCellT<ReconstructionMethod::plm, ivx>(
+              creos, true, m, n, k, j, i, q, ql, qr);
+        });
+      break;
+    case ReconstructionMethod::ppm4:
+      par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
+          ReconCellT<ReconstructionMethod::ppm4, ivx>(
+              creos, true, m, n, k, j, i, q, ql, qr);
+        });
+      break;
+    case ReconstructionMethod::ppmx:
+      par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
+          ReconCellT<ReconstructionMethod::ppmx, ivx>(
+              creos, true, m, n, k, j, i, q, ql, qr);
+        });
+      break;
+    case ReconstructionMethod::wenoz:
+      par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
+          ReconCellT<ReconstructionMethod::wenoz, ivx>(
+              creos, true, m, n, k, j, i, q, ql, qr);
+        });
+      break;
+    case ReconstructionMethod::teno:
+      par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
+          ReconCellT<ReconstructionMethod::teno, ivx>(
+              creos, true, m, n, k, j, i, q, ql, qr);
+        });
+      break;
+    case ReconstructionMethod::dc:
+    default:
+      par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
+          ReconCellT<ReconstructionMethod::dc, ivx>(
+              creos, true, m, n, k, j, i, q, ql, qr);
         });
       break;
   }

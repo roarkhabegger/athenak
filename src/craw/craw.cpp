@@ -14,6 +14,8 @@
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "bvals/bvals.hpp"
+#include "eos/eos.hpp"
+#include "mhd/mhd.hpp"
 #include "craw/craw.hpp"
 
 namespace craw {
@@ -26,6 +28,8 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
     coarse_u0("craw_coarse_u0",1,1,1,1,1),
     uflx("craw_uflx",1,1,1,1,1),
     uflx_aniso("craw_uflx_aniso",1,1,1,1,1),
+    uface_cr("craw_uface_cr",1,1,1,1),
+    crflx_adv("craw_crflx_adv",1,1,1,1,1),
     dtnew(0.0),
     subcycle_seconds(0.0),
     nsubcycles(0),
@@ -48,10 +52,8 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
   }
   atol = pin->GetOrAddReal("craw","atol",1.0e-8);
   rtol = pin->GetOrAddReal("craw","rtol",1.0e-6);
-  // floors on the CR energy density and the wave energy densities, as dfloor/pfloor in
-  // hydro and MHD. Default 1e-16 (code units). Applied after each update so the energies stay positive.
-  efloor = pin->GetOrAddReal("craw","efloor",1.0e-16);
-  wfloor = pin->GetOrAddReal("craw","wfloor",1.0e-16);
+  // CR pressures and floors live in the CR equation of state (creos.hpp)
+  pcreos = new CREOS(pin);
 
   m_cr = pin->GetOrAddReal("craw","m_cr",1.0) * 1.67262192e-24;
 
@@ -66,6 +68,29 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<craw> with a fluid requires <mhd>; hydro-only is not supported" << std::endl;
     std::exit(EXIT_FAILURE);
+  }
+
+  // Unit scales and B-independent coefficients, in code units (L = pc, T = Myr, rho = m_p/cm^3).
+  // The same constants serve the standalone branch (constant B, rho, T) and the MHD source step,
+  // which evaluates chi and alpha per cell from the local state.
+  if (pmy_pack->pmhd != nullptr && !pmy_pack->pmhd->peos->eos_data.is_ideal) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<craw> with <mhd> requires an ideal-gas EOS (alpha uses P/rho)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  {
+    Real rho0_g = 1.67262192e-24;      // g, density unit
+    v_unit = l0/t0;                    // cm/s per code velocity
+    E_unit = rho0_g*SQR(v_unit);       // erg/cm^3 per code energy density
+    T_unit = t0;                       // s
+    Real c_red_cgs = v_max*v_unit;     // reduced speed of light, cm/s
+    // same factors as the standalone chi, with the B_gauss in the denominator left out
+    chi_K = (3.0*M_PI/8.0)*4.803e-10/(lorentz*m_cr*c_red_cgs*c_red_cgs*c_red_cgs)
+            * SQR(l0/t0)*t0*rho0_g*SQR(l0/t0);
+    // same factors as the standalone alpha, with B_gauss and sqrt(kT/m_p) left out
+    Real m_p_g = 1.67262192e-24;
+    Real c_cgs = 2.99792458e10;
+    alpha_K = (std::sqrt(M_PI)/4.0)*4.803e-10/(lorentz*m_p_g*c_cgs*c_cgs);
   }
 
   if (!has_fluid) {
@@ -99,6 +124,7 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
     Real T_unit = t0;                                       // s
     alpha_landau = alpha_cgs*E_unit*T_unit;                 // code units
   } else {
+    // with a fluid, v_A, chi and alpha are set per cell in the source step from the MHD state
     v_A = 0.0;
     B_code = 0.0;
     chi_cr = 0.0;
@@ -138,6 +164,16 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
   Kokkos::realloc(uflx_aniso.x1f, nmb, nvars, ncells3, ncells2, ncells1+1);
   Kokkos::realloc(uflx_aniso.x2f, nmb, nvars, ncells3, ncells2+1, ncells1);
   Kokkos::realloc(uflx_aniso.x3f, nmb, nvars, ncells3+1, ncells2, ncells1);
+
+  // adiabatic CR step: reconstructed L/R cell states and face outputs, all directions
+  Kokkos::realloc(wl_cr, nmb, nvars, ncells3, ncells2, ncells1);
+  Kokkos::realloc(wr_cr, nmb, nvars, ncells3, ncells2, ncells1);
+  Kokkos::realloc(uface_cr.x1f, nmb, ncells3, ncells2, ncells1+1);
+  Kokkos::realloc(uface_cr.x2f, nmb, ncells3, ncells2+1, ncells1);
+  Kokkos::realloc(uface_cr.x3f, nmb, ncells3+1, ncells2, ncells1);
+  Kokkos::realloc(crflx_adv.x1f, nmb, nvars, ncells3, ncells2, ncells1+1);
+  Kokkos::realloc(crflx_adv.x2f, nmb, nvars, ncells3, ncells2+1, ncells1);
+  Kokkos::realloc(crflx_adv.x3f, nmb, nvars, ncells3+1, ncells2, ncells1);
   if (pmy_pack->pmesh->multilevel) {
     int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
     int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
@@ -155,6 +191,7 @@ CosmicRayAW::CosmicRayAW(MeshBlockPack *ppack, ParameterInput *pin) :
 
 CosmicRayAW::~CosmicRayAW() {
   delete pbval_u;
+  delete pcreos;
 }
 
 } // namespace craw
